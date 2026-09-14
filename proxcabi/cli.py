@@ -35,6 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--z-buckets", type=int, default=256)
     p.add_argument("--w-buckets", type=int, default=256)
 
+    p = sub.add_parser("build-fever-counterfactuals", help="Build FEVER counterfactual augmentation split")
+    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--source-split", default="train")
+    p.add_argument("--output-split", default="cf_train")
+    p.add_argument("--max-source-samples", type=int)
+    p.add_argument("--max-groups", type=int)
+    p.add_argument("--seed", type=int, default=13)
+    p.add_argument("--no-include-original", action="store_true")
+
     p = sub.add_parser("diagnose", help="Run Stage 2 proxy diagnostics")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
     p.add_argument("--output-dir", type=Path, default=Path("outputs/diagnostics"))
@@ -54,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--eval-split", default="dev")
     p.add_argument("--max-train-samples", type=int)
     p.add_argument("--max-eval-samples", type=int)
+    p.add_argument("--counterfactual-split")
+    p.add_argument("--max-counterfactual-samples", type=int)
     p.add_argument("--max-length", type=int, default=256)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--eval-batch-size", type=int, default=16)
@@ -71,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fp16", action="store_true")
     p.add_argument("--balanced-loss", action="store_true")
     p.add_argument("--class-weight-power", type=float, default=1.0)
+    p.add_argument("--contrastive-weight", type=float, default=0.0)
+    p.add_argument("--contrastive-margin", type=float, default=1.0)
 
     p = sub.add_parser("evaluate", help="Evaluate a saved ProxCABI-FV checkpoint")
     p.add_argument("--checkpoint-dir", type=Path, required=True)
@@ -108,6 +121,19 @@ def main() -> None:
             args.z_buckets,
             args.w_buckets,
         )
+    elif args.command == "build-fever-counterfactuals":
+        from .counterfactuals import build_fever_counterfactuals
+
+        result = build_fever_counterfactuals(
+            args.data_dir,
+            args.source_split,
+            args.output_split,
+            args.max_source_samples,
+            args.max_groups,
+            args.seed,
+            not args.no_include_original,
+        )
+        print(json.dumps(result, indent=2))
     elif args.command == "diagnose":
         from .diagnostics import run_diagnostics
 

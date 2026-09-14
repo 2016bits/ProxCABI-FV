@@ -93,6 +93,15 @@ python -m proxcabi evaluate \
   --split symmetric
 ```
 
+Build FEVER train-only counterfactual augmentation and train with contrastive ranking:
+
+```bash
+bash run_scripts/build_fever_counterfactuals.sh
+bash run_scripts/train_fever_counterfactual_contrastive.sh
+```
+
+This uses only FEVER `train`/`dev` to create `cf_train`/`cf_dev`; it does not use symmetric-FEVER IDs or grouped test structure.
+
 Train PolitiHop and evaluate symmetric-PolitiHop:
 
 ```bash

@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
@@ -18,7 +19,7 @@ from .data import ID_TO_LABEL, LABELS, FactSample, load_samples
 from .metrics import classification_metrics
 from .model import LossWeights, ProxCABIModel
 from .proxies import ProxyBuilder
-from .torch_data import Collator, FactVerificationDataset
+from .torch_data import Collator, ContrastiveBatchSampler, FactVerificationDataset
 
 
 def set_seed(seed: int) -> None:
@@ -37,6 +38,8 @@ def train(
     eval_split: str = "dev",
     max_train_samples: Optional[int] = None,
     max_eval_samples: Optional[int] = None,
+    counterfactual_split: Optional[str] = None,
+    max_counterfactual_samples: Optional[int] = None,
     max_length: int = 256,
     batch_size: int = 8,
     eval_batch_size: int = 16,
@@ -54,12 +57,24 @@ def train(
     fp16: bool = False,
     balanced_loss: bool = False,
     class_weight_power: float = 1.0,
+    contrastive_weight: float = 0.0,
+    contrastive_margin: float = 1.0,
 ) -> Dict[str, object]:
     set_seed(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_samples = load_samples(data_dir, dataset, train_split, max_samples=max_train_samples)
+    num_base_train_samples = len(train_samples)
+    counterfactual_samples: List[FactSample] = []
+    if counterfactual_split:
+        counterfactual_samples = load_samples(
+            data_dir,
+            dataset,
+            counterfactual_split,
+            max_samples=max_counterfactual_samples,
+        )
+        train_samples = train_samples + counterfactual_samples
     eval_samples = load_samples(data_dir, dataset, eval_split, max_samples=max_eval_samples)
     proxy_builder = ProxyBuilder(z_buckets=z_buckets, w_buckets=w_buckets).fit(train_samples)
     proxy_builder.save(output_dir / "proxy_builder.json")
@@ -67,7 +82,16 @@ def train(
     tokenizer = AutoTokenizer.from_pretrained(backbone, use_fast=True)
     tokenizer.save_pretrained(output_dir / "tokenizer")
 
-    train_loader = _loader(train_samples, proxy_builder, tokenizer, max_length, batch_size, shuffle=True)
+    train_loader = _loader(
+        train_samples,
+        proxy_builder,
+        tokenizer,
+        max_length,
+        batch_size,
+        shuffle=True,
+        keep_contrast_groups=contrastive_weight > 0,
+        seed=seed,
+    )
     eval_loader = _loader(eval_samples, proxy_builder, tokenizer, max_length, eval_batch_size, shuffle=False)
 
     model = ProxCABIModel(
@@ -109,7 +133,15 @@ def train(
                     loss_weights=loss_weights,
                     label_weights=label_weights,
                 )
-                loss = out["loss"] / max(1, gradient_accumulation_steps)
+                contrastive_loss = _contrastive_group_loss(
+                    out["fact_logits"],
+                    out["g_logits"],
+                    batch["labels"],
+                    batch.get("contrast_groups", []),
+                    contrastive_margin,
+                )
+                total_loss = out["loss"] + contrastive_weight * contrastive_loss
+                loss = total_loss / max(1, gradient_accumulation_steps)
             scaler.scale(loss).backward()
             if step % gradient_accumulation_steps == 0:
                 scaler.unscale_(optimizer)
@@ -119,7 +151,7 @@ def train(
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
-            running.append(float(out["loss"].detach().cpu()))
+            running.append(float(total_loss.detach().cpu()))
             if running:
                 pbar.set_postfix(loss=sum(running[-50:]) / len(running[-50:]))
 
@@ -139,6 +171,11 @@ def train(
         "balanced_loss": balanced_loss,
         "class_weight_power": class_weight_power if balanced_loss else None,
         "class_weights": label_weights.detach().cpu().tolist() if label_weights is not None else None,
+        "counterfactual_split": counterfactual_split,
+        "num_base_train_samples": num_base_train_samples,
+        "num_counterfactual_samples": len(counterfactual_samples),
+        "contrastive_weight": contrastive_weight,
+        "contrastive_margin": contrastive_margin,
         "history": history,
     }
     (output_dir / "train_summary.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -264,8 +301,18 @@ def _loader(
     max_length: int,
     batch_size: int,
     shuffle: bool,
+    keep_contrast_groups: bool = False,
+    seed: int = 13,
 ) -> DataLoader:
     dataset = FactVerificationDataset(samples, proxy_builder)
+    if keep_contrast_groups:
+        return DataLoader(
+            dataset,
+            batch_sampler=ContrastiveBatchSampler(samples, batch_size=batch_size, shuffle=shuffle, seed=seed),
+            collate_fn=Collator(tokenizer, max_length=max_length),
+            num_workers=2,
+            pin_memory=torch.cuda.is_available(),
+        )
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -296,6 +343,42 @@ def _class_weights(
         weights.append(weight**power if weight else 0.0)
     values = torch.tensor(weights, dtype=torch.float, device=device)
     return values / values.mean().clamp_min(1e-8)
+
+
+def _contrastive_group_loss(
+    fact_logits: torch.Tensor,
+    g_logits: torch.Tensor,
+    labels: torch.Tensor,
+    contrast_groups: List[str],
+    margin: float,
+) -> torch.Tensor:
+    if not contrast_groups:
+        return fact_logits.sum() * 0.0
+    fact_loss = _contrastive_loss_for_logits(fact_logits, labels, contrast_groups, margin)
+    g_loss = _contrastive_loss_for_logits(g_logits, labels, contrast_groups, margin)
+    return 0.5 * (fact_loss + g_loss)
+
+
+def _contrastive_loss_for_logits(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    contrast_groups: List[str],
+    margin: float,
+) -> torch.Tensor:
+    support_margin = logits[:, 0] - logits[:, 1]
+    losses = []
+    for group in sorted(set(group for group in contrast_groups if group)):
+        idx = [i for i, value in enumerate(contrast_groups) if value == group]
+        pos_idx = [i for i in idx if int(labels[i].detach().cpu()) == 0]
+        neg_idx = [i for i in idx if int(labels[i].detach().cpu()) == 1]
+        if not pos_idx or not neg_idx:
+            continue
+        pos_scores = support_margin[pos_idx].unsqueeze(1)
+        neg_scores = support_margin[neg_idx].unsqueeze(0)
+        losses.append(F.relu(margin - pos_scores + neg_scores).mean())
+    if not losses:
+        return logits.sum() * 0.0
+    return torch.stack(losses).mean()
 
 
 @torch.no_grad()
