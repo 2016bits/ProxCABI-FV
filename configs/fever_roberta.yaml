@@ -1,0 +1,16 @@
+data_dir: data
+dataset: FEVER
+output_dir: outputs/fever_roberta
+backbone: roberta-base
+train_split: train
+eval_split: dev
+max_length: 256
+batch_size: 16
+eval_batch_size: 32
+epochs: 3
+lr: 2.0e-5
+bridge_weight: 0.2
+proxy_weight: 1.0
+g_weight: 1.0
+z_buckets: 256
+w_buckets: 256
