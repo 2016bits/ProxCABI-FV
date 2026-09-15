@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-groups", type=int)
     p.add_argument("--seed", type=int, default=13)
     p.add_argument("--no-include-original", action="store_true")
+    p.add_argument("--mode", choices=["basic", "hard", "mixed"], default="basic")
 
     p = sub.add_parser("diagnose", help="Run Stage 2 proxy diagnostics")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -132,6 +133,7 @@ def main() -> None:
             args.max_groups,
             args.seed,
             not args.no_include_original,
+            args.mode,
         )
         print(json.dumps(result, indent=2))
     elif args.command == "diagnose":

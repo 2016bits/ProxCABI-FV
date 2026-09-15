@@ -102,6 +102,14 @@ bash run_scripts/train_fever_counterfactual_contrastive.sh
 
 This uses only FEVER `train`/`dev` to create `cf_train`/`cf_dev`; it does not use symmetric-FEVER IDs or grouped test structure.
 
+For the stronger fair symmetric-FEVER setting, build hard negation/exclusivity counterfactuals and train with proximal-head contrastive ranking:
+
+```bash
+bash run_scripts/run_fever_hard_cf_proximal_contrastive.sh
+```
+
+This creates `cf_train_hard`/`cf_dev_hard`, trains `outputs/fever_roberta_hard_cf_prox_contrastive`, disables fp16 for stability, limits hard augmentation to 40k rows, and applies contrastive ranking to the final proximal head as well as the fact/g heads.
+
 Train PolitiHop and evaluate symmetric-PolitiHop:
 
 ```bash

@@ -138,7 +138,6 @@ class ProxCABIModel(nn.Module):
             )
         return out
 
-    @torch.no_grad()
     def proximal_logits(self, m: torch.Tensor, w_marginal: torch.Tensor) -> torch.Tensor:
         h_probs = F.softmax(self.h_all_w(m), dim=-1)
         weights = w_marginal.to(m.device, h_probs.dtype)

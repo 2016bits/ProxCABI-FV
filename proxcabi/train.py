@@ -112,6 +112,11 @@ def train(
     scaler = torch.cuda.amp.GradScaler(enabled=fp16 and device.type == "cuda")
     loss_weights = LossWeights(proxy=proxy_weight, bridge=bridge_weight, g=g_weight)
     label_weights = _class_weights(train_samples, len(LABELS), device, class_weight_power) if balanced_loss else None
+    w_marginal = torch.tensor(
+        proxy_builder.w_marginal or [1.0 / proxy_builder.w_buckets] * proxy_builder.w_buckets,
+        device=device,
+        dtype=torch.float,
+    )
 
     best_metric = -1.0
     history: List[Dict[str, object]] = []
@@ -133,14 +138,21 @@ def train(
                     loss_weights=loss_weights,
                     label_weights=label_weights,
                 )
+                prox_logits = model.proximal_logits(out["m"], w_marginal)
                 contrastive_loss = _contrastive_group_loss(
                     out["fact_logits"],
                     out["g_logits"],
+                    prox_logits,
                     batch["labels"],
                     batch.get("contrast_groups", []),
                     contrastive_margin,
                 )
                 total_loss = out["loss"] + contrastive_weight * contrastive_loss
+                if not torch.isfinite(total_loss):
+                    raise FloatingPointError(
+                        f"Non-finite training loss at epoch {epoch + 1}, step {step}. "
+                        "Try disabling fp16, lowering --lr, or reducing --contrastive-weight."
+                    )
                 loss = total_loss / max(1, gradient_accumulation_steps)
             scaler.scale(loss).backward()
             if step % gradient_accumulation_steps == 0:
@@ -348,6 +360,7 @@ def _class_weights(
 def _contrastive_group_loss(
     fact_logits: torch.Tensor,
     g_logits: torch.Tensor,
+    prox_logits: torch.Tensor,
     labels: torch.Tensor,
     contrast_groups: List[str],
     margin: float,
@@ -356,7 +369,8 @@ def _contrastive_group_loss(
         return fact_logits.sum() * 0.0
     fact_loss = _contrastive_loss_for_logits(fact_logits, labels, contrast_groups, margin)
     g_loss = _contrastive_loss_for_logits(g_logits, labels, contrast_groups, margin)
-    return 0.5 * (fact_loss + g_loss)
+    prox_loss = _contrastive_loss_for_logits(prox_logits, labels, contrast_groups, margin)
+    return (fact_loss + g_loss + prox_loss) / 3.0
 
 
 def _contrastive_loss_for_logits(
