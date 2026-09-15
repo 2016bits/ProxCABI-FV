@@ -44,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=13)
     p.add_argument("--no-include-original", action="store_true")
     p.add_argument("--mode", choices=["basic", "hard", "mixed"], default="basic")
+    p.add_argument("--teacher-model")
+    p.add_argument("--teacher-min-confidence", type=float, default=0.7)
+    p.add_argument("--teacher-batch-size", type=int, default=16)
+    p.add_argument("--teacher-device")
 
     p = sub.add_parser("diagnose", help="Run Stage 2 proxy diagnostics")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -134,6 +138,10 @@ def main() -> None:
             args.seed,
             not args.no_include_original,
             args.mode,
+            args.teacher_model,
+            args.teacher_min_confidence,
+            args.teacher_batch_size,
+            args.teacher_device,
         )
         print(json.dumps(result, indent=2))
     elif args.command == "diagnose":

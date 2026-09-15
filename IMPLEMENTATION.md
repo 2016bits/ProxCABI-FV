@@ -110,6 +110,20 @@ bash run_scripts/run_fever_hard_cf_proximal_contrastive.sh
 
 This creates `cf_train_hard`/`cf_dev_hard`, trains `outputs/fever_roberta_hard_cf_prox_contrastive`, disables fp16 for stability, limits hard augmentation to 40k rows, and applies contrastive ranking to the final proximal head as well as the fact/g heads.
 
+To reduce counterfactual label noise, build hard counterfactuals filtered by an NLI teacher and then train either RoBERTa or DeBERTa:
+
+```bash
+bash run_scripts/build_fever_hard_nli_counterfactuals.sh
+bash run_scripts/train_fever_roberta_hard_nli_proximal_contrastive.sh
+bash run_scripts/train_fever_deberta_hard_nli_proximal_contrastive.sh
+```
+
+The default teacher is `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`; override it with `TEACHER_MODEL=...` or adjust strictness with `TEACHER_MIN_CONFIDENCE=...`. The DeBERTa all-in-one command is:
+
+```bash
+bash run_scripts/run_fever_deberta_hard_nli_proximal_contrastive.sh
+```
+
 Train PolitiHop and evaluate symmetric-PolitiHop:
 
 ```bash

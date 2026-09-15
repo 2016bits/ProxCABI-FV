@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+import torch
+from tqdm.auto import tqdm
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
 from .data import FactSample, load_samples
 
 
@@ -100,24 +104,63 @@ def build_fever_counterfactuals(
     seed: int = 13,
     include_original: bool = True,
     mode: str = "basic",
+    teacher_model: Optional[str] = None,
+    teacher_min_confidence: float = 0.7,
+    teacher_batch_size: int = 16,
+    teacher_device: Optional[str] = None,
 ) -> Dict[str, object]:
     if mode not in {"basic", "hard", "mixed"}:
         raise ValueError(f"Unsupported counterfactual mode: {mode!r}")
     samples = load_samples(data_dir, "FEVER", source_split, max_samples=max_source_samples)
+    teacher = (
+        _NliTeacher(teacher_model, teacher_min_confidence, teacher_batch_size, teacher_device)
+        if teacher_model
+        else None
+    )
     rng = random.Random(seed)
     groups = []
     edit_counts: Dict[str, int] = {}
-    for sample in samples:
+    candidate_groups = 0
+    rejected_groups = 0
+    pending: List[Tuple[List[Dict[str, object]], str]] = []
+
+    def accept(rows: List[Dict[str, object]], edit_type: str) -> bool:
+        groups.extend(rows)
+        edit_counts[edit_type] = edit_counts.get(edit_type, 0) + 1
+        return max_groups is not None and sum(edit_counts.values()) >= max_groups
+
+    def flush_pending() -> bool:
+        nonlocal rejected_groups, pending
+        if not pending:
+            return False
+        accepted, rejected = _filter_candidate_groups(pending, teacher)
+        rejected_groups += rejected
+        pending = []
+        for rows, edit_type in accepted:
+            if accept(rows, edit_type):
+                return True
+        return False
+
+    iterator = tqdm(samples, desc=f"build {output_split}", leave=False) if teacher else samples
+    for sample in iterator:
         if sample.label != "supports":
             continue
 
         rows, edit_type = _choose_group(sample, output_split, include_original, mode, rng)
         if not rows or edit_type is None:
             continue
-        groups.extend(rows)
-        edit_counts[edit_type] = edit_counts.get(edit_type, 0) + 1
-        if max_groups is not None and sum(edit_counts.values()) >= max_groups:
-            break
+        candidate_groups += 1
+        if teacher is None:
+            if accept(rows, edit_type):
+                break
+            continue
+
+        pending.append((rows, edit_type))
+        if len(pending) >= max(1, teacher_batch_size):
+            if flush_pending():
+                break
+    else:
+        flush_pending()
 
     converted = data_dir / "FEVER" / "converted_data"
     converted.mkdir(parents=True, exist_ok=True)
@@ -133,6 +176,13 @@ def build_fever_counterfactuals(
         "edit_counts": edit_counts,
         "include_original": include_original,
         "mode": mode,
+        "teacher_model": teacher_model,
+        "teacher_min_confidence": teacher_min_confidence if teacher_model else None,
+        "teacher_candidate_groups": candidate_groups if teacher_model else None,
+        "teacher_rejected_groups": rejected_groups if teacher_model else None,
+        "teacher_acceptance_rate": (
+            (sum(edit_counts.values()) / candidate_groups) if teacher_model and candidate_groups else None
+        ),
     }
     stats_dir = converted / "counterfactual_stats"
     stats_dir.mkdir(parents=True, exist_ok=True)
@@ -167,6 +217,101 @@ def _choose_group(
     if edit is None:
         return [], None
     return _make_basic_group(sample, edit, output_split, include_original), edit.edit_type
+
+
+class _NliTeacher:
+    def __init__(self, model_name: str, min_confidence: float, batch_size: int, device: Optional[str]) -> None:
+        self.model_name = model_name
+        self.min_confidence = min_confidence
+        self.batch_size = max(1, batch_size)
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_name).to(self.device)
+        self.model.eval()
+        self.label_map = {
+            int(index): _normalize_nli_label(label)
+            for index, label in getattr(self.model.config, "id2label", {}).items()
+        }
+
+    @torch.no_grad()
+    def annotate(self, rows: List[Dict[str, object]]) -> List[Tuple[str, float]]:
+        premises = [str(row.get("evidence", "")) for row in rows]
+        hypotheses = [str(row.get("claim", "")) for row in rows]
+        results: List[Tuple[str, float]] = []
+        for start in range(0, len(rows), self.batch_size):
+            encoded = self.tokenizer(
+                premises[start : start + self.batch_size],
+                hypotheses[start : start + self.batch_size],
+                truncation=True,
+                padding=True,
+                max_length=256,
+                return_tensors="pt",
+            )
+            encoded = {key: value.to(self.device) for key, value in encoded.items()}
+            logits = self.model(**encoded).logits
+            probs = torch.softmax(logits, dim=-1)
+            values, indices = probs.max(dim=-1)
+            for index, value in zip(indices.detach().cpu().tolist(), values.detach().cpu().tolist()):
+                results.append((self.label_map.get(int(index), "unknown"), float(value)))
+        return results
+
+
+def _filter_candidate_groups(
+    candidates: List[Tuple[List[Dict[str, object]], str]],
+    teacher: Optional[_NliTeacher],
+) -> Tuple[List[Tuple[List[Dict[str, object]], str]], int]:
+    if teacher is None:
+        return candidates, 0
+    flat_rows = [row for rows, _ in candidates for row in rows if _should_teacher_check(row)]
+    annotations = iter(teacher.annotate(flat_rows))
+    accepted = []
+    rejected = 0
+    for rows, edit_type in candidates:
+        keep = True
+        for row in rows:
+            if not _should_teacher_check(row):
+                continue
+            predicted, confidence = next(annotations)
+            row_metadata = dict(row.get("metadata") or {})
+            row_metadata["nli_teacher_model"] = teacher.model_name
+            row_metadata["nli_teacher_label"] = predicted
+            row_metadata["nli_teacher_confidence"] = confidence
+            row["metadata"] = row_metadata
+            expected = _expected_nli_label(str(row.get("label", "")))
+            if predicted != expected or confidence < teacher.min_confidence:
+                keep = False
+        if keep:
+            accepted.append((rows, edit_type))
+        else:
+            rejected += 1
+    return accepted, rejected
+
+
+def _should_teacher_check(row: Dict[str, object]) -> bool:
+    metadata = row.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return True
+    return str(metadata.get("contrast_role", "")) != "orig_support"
+
+
+def _expected_nli_label(label: str) -> str:
+    normalized = label.strip().lower().replace("_", " ")
+    if normalized in {"supports", "support", "supported"}:
+        return "entailment"
+    if normalized in {"refutes", "refute", "refuted"}:
+        return "contradiction"
+    return "neutral"
+
+
+def _normalize_nli_label(label: object) -> str:
+    text = str(label).strip().lower().replace("_", " ")
+    if "entail" in text or "support" in text:
+        return "entailment"
+    if "contrad" in text or "refut" in text:
+        return "contradiction"
+    if "neutral" in text or "not enough" in text or text == "nei":
+        return "neutral"
+    return text
 
 
 def _choose_edit(sample: FactSample, rng: random.Random) -> Optional[Edit]:
