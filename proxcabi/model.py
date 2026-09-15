@@ -54,7 +54,7 @@ class ProxCABIModel(nn.Module):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
-        self.encoder = AutoModel.from_pretrained(backbone_name)
+        self.encoder = _load_auto_model(backbone_name)
         hidden = int(self.encoder.config.hidden_size)
         self.z_embeddings = nn.Embedding(z_buckets, proxy_dim)
         self.w_embeddings = nn.Embedding(w_buckets, proxy_dim)
@@ -144,3 +144,10 @@ class ProxCABIModel(nn.Module):
         weights = weights / weights.sum().clamp_min(1e-8)
         probs = torch.einsum("w,bwc->bc", weights, h_probs)
         return torch.log(probs.clamp_min(1e-8))
+
+
+def _load_auto_model(backbone_name: str):
+    try:
+        return AutoModel.from_pretrained(backbone_name, use_safetensors=True).float()
+    except (OSError, ValueError):
+        return AutoModel.from_pretrained(backbone_name).float()

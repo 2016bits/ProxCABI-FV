@@ -12,7 +12,7 @@ python -m proxcabi train \
   --eval-split dev \
   --counterfactual-split cf_train_hard_nli \
   --max-counterfactual-samples 40000 \
-  --epochs 3 \
+  --epochs 2 \
   --lr 8e-6 \
   --batch-size 8 \
   --gradient-accumulation-steps 2 \

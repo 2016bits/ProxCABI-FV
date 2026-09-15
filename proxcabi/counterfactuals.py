@@ -226,7 +226,7 @@ class _NliTeacher:
         self.batch_size = max(1, batch_size)
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name).to(self.device)
+        self.model = _load_teacher_model(model_name).to(self.device)
         self.model.eval()
         self.label_map = {
             int(index): _normalize_nli_label(label)
@@ -312,6 +312,13 @@ def _normalize_nli_label(label: object) -> str:
     if "neutral" in text or "not enough" in text or text == "nei":
         return "neutral"
     return text
+
+
+def _load_teacher_model(model_name: str):
+    try:
+        return AutoModelForSequenceClassification.from_pretrained(model_name, use_safetensors=True)
+    except (OSError, ValueError):
+        return AutoModelForSequenceClassification.from_pretrained(model_name)
 
 
 def _choose_edit(sample: FactSample, rng: random.Random) -> Optional[Edit]:
