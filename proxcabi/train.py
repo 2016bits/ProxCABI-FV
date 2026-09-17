@@ -15,9 +15,10 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
+from .bias_groups import bias_sample_weights, label_lmi_terms, parse_bias_features, sample_bias_group_tags
 from .data import ID_TO_LABEL, LABELS, FactSample, load_samples
 from .metrics import classification_metrics
-from .model import LossWeights, ProxCABIModel
+from .model import LossWeights, ProxCABIModel, js_divergence
 from .proxies import ProxyBuilder
 from .torch_data import Collator, ContrastiveBatchSampler, FactVerificationDataset
 
@@ -63,6 +64,12 @@ def train(
     disable_z_proxy: bool = False,
     disable_w_proxy: bool = False,
     selection_head: str = "proximal",
+    bias_reweighting: bool = False,
+    bias_reweight_factor: float = 1.5,
+    group_dro_weight: float = 0.0,
+    bias_features: str = "claim_negation,claim_label_lmi,claim_evidence_lexical_overlap",
+    bias_lmi_top_k_per_label: int = 32,
+    bias_lmi_min_count: int = 5,
 ) -> Dict[str, object]:
     set_seed(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -82,6 +89,21 @@ def train(
     eval_samples = load_samples(data_dir, dataset, eval_split, max_samples=max_eval_samples)
     proxy_builder = ProxyBuilder(z_buckets=z_buckets, w_buckets=w_buckets).fit(train_samples)
     proxy_builder.save(output_dir / "proxy_builder.json")
+    selected_bias_features = parse_bias_features(bias_features)
+    use_bias_groups = bias_reweighting or group_dro_weight > 0
+    train_bias_groups: Optional[List[List[str]]] = None
+    train_bias_weights: Optional[List[float]] = None
+    bias_summary: Optional[Dict[str, object]] = None
+    if use_bias_groups:
+        train_label_lmi = label_lmi_terms(train_samples, bias_lmi_top_k_per_label, bias_lmi_min_count)
+        train_bias_groups = sample_bias_group_tags(train_samples, train_label_lmi, selected_bias_features)
+        train_bias_weights = (
+            bias_sample_weights(train_bias_groups, bias_reweight_factor, selected_bias_features)
+            if bias_reweighting
+            else [1.0] * len(train_samples)
+        )
+        bias_summary = _bias_training_summary(train_bias_groups, train_bias_weights, selected_bias_features)
+        (output_dir / "bias_training_groups.json").write_text(json.dumps(bias_summary, indent=2), encoding="utf-8")
 
     tokenizer = AutoTokenizer.from_pretrained(backbone, use_fast=True)
     tokenizer.save_pretrained(output_dir / "tokenizer")
@@ -95,6 +117,8 @@ def train(
         shuffle=True,
         keep_contrast_groups=contrastive_weight > 0,
         seed=seed,
+        sample_weights=train_bias_weights,
+        sample_bias_groups=train_bias_groups,
     )
     eval_loader = _loader(eval_samples, proxy_builder, tokenizer, max_length, eval_batch_size, shuffle=False)
 
@@ -157,7 +181,24 @@ def train(
                     contrastive_margin,
                     contrastive_head_names,
                 )
-                total_loss = out["loss"] + contrastive_weight * contrastive_loss
+                if use_bias_groups:
+                    supervised_loss, per_sample_supervised = _bias_aware_training_loss(
+                        model,
+                        out,
+                        prox_logits,
+                        batch,
+                        loss_weights,
+                        label_weights,
+                    )
+                    dro_loss = _group_dro_loss(
+                        per_sample_supervised,
+                        batch.get("bias_groups", []),
+                        selected_bias_features,
+                    )
+                    total_loss = supervised_loss + group_dro_weight * dro_loss + contrastive_weight * contrastive_loss
+                else:
+                    dro_loss = out["loss"] * 0.0
+                    total_loss = out["loss"] + contrastive_weight * contrastive_loss
                 if not torch.isfinite(total_loss):
                     raise FloatingPointError(
                         f"Non-finite training loss at epoch {epoch + 1}, step {step}. "
@@ -175,7 +216,10 @@ def train(
                 global_step += 1
             running.append(float(total_loss.detach().cpu()))
             if running:
-                pbar.set_postfix(loss=sum(running[-50:]) / len(running[-50:]))
+                postfix = {"loss": sum(running[-50:]) / len(running[-50:])}
+                if use_bias_groups:
+                    postfix["dro"] = float(dro_loss.detach().cpu())
+                pbar.set_postfix(postfix)
 
         metrics = evaluate_model(model, eval_loader, proxy_builder, device)
         metrics["epoch"] = epoch + 1
@@ -212,6 +256,11 @@ def train(
         "disable_z_proxy": disable_z_proxy,
         "disable_w_proxy": disable_w_proxy,
         "selection_head": selection_head,
+        "bias_reweighting": bias_reweighting,
+        "bias_reweight_factor": bias_reweight_factor if bias_reweighting else None,
+        "group_dro_weight": group_dro_weight,
+        "bias_features": selected_bias_features if use_bias_groups else [],
+        "bias_training_summary": bias_summary,
         "history": history,
     }
     (output_dir / "train_summary.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -340,8 +389,10 @@ def _loader(
     shuffle: bool,
     keep_contrast_groups: bool = False,
     seed: int = 13,
+    sample_weights: Optional[List[float]] = None,
+    sample_bias_groups: Optional[List[List[str]]] = None,
 ) -> DataLoader:
-    dataset = FactVerificationDataset(samples, proxy_builder)
+    dataset = FactVerificationDataset(samples, proxy_builder, sample_weights, sample_bias_groups)
     if keep_contrast_groups:
         return DataLoader(
             dataset,
@@ -380,6 +431,99 @@ def _class_weights(
         weights.append(weight**power if weight else 0.0)
     values = torch.tensor(weights, dtype=torch.float, device=device)
     return values / values.mean().clamp_min(1e-8)
+
+
+def _bias_aware_training_loss(
+    model: ProxCABIModel,
+    out: Dict[str, torch.Tensor],
+    prox_logits: torch.Tensor,
+    batch: Dict[str, object],
+    loss_weights: LossWeights,
+    label_weights: Optional[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    labels = batch["labels"]
+    w_ids = batch["w_ids"]
+    bias_weights = batch["bias_weights"].to(labels.device, dtype=out["fact_logits"].dtype)
+    bias_weights = bias_weights / bias_weights.mean().clamp_min(1e-8)
+    fact_ce = F.cross_entropy(out["fact_logits"], labels, weight=label_weights, reduction="none")
+    g_ce = F.cross_entropy(out["g_logits"], labels, weight=label_weights, reduction="none")
+    prox_ce = F.cross_entropy(prox_logits, labels, weight=label_weights, reduction="none")
+    fact_loss = (fact_ce * bias_weights).mean()
+    g_loss = (g_ce * bias_weights).mean()
+    proxy_loss = (
+        F.cross_entropy(out["proxy_logits"], w_ids)
+        if model.use_w_proxy
+        else out["fact_logits"].sum() * 0.0
+    )
+    if model.use_w_proxy:
+        bridge_per_sample = js_divergence(F.softmax(out["g_logits"], dim=-1), out["bridge_probs"])
+        bridge_loss = bridge_per_sample.mean()
+    else:
+        bridge_loss = out["fact_logits"].sum() * 0.0
+    total = (
+        loss_weights.fact * fact_loss
+        + loss_weights.g * g_loss
+        + loss_weights.proxy * proxy_loss
+        + loss_weights.bridge * bridge_loss
+    )
+    per_sample_supervised = 0.5 * (fact_ce + g_ce) + prox_ce
+    return total, per_sample_supervised
+
+
+def _group_dro_loss(
+    per_sample_loss: torch.Tensor,
+    bias_groups: List[List[str]],
+    selected_features: List[str],
+) -> torch.Tensor:
+    if not bias_groups or not selected_features:
+        return per_sample_loss.sum() * 0.0
+    selected = set(selected_features)
+    losses = []
+    for feature in selected:
+        group_values = sorted(
+            {
+                tag
+                for tags in bias_groups
+                for tag in tags
+                if tag.startswith(f"{feature}=")
+            }
+        )
+        for group in group_values:
+            idx = [i for i, tags in enumerate(bias_groups) if group in tags]
+            if idx:
+                losses.append(per_sample_loss[idx].mean())
+    if not losses:
+        return per_sample_loss.sum() * 0.0
+    return torch.stack(losses).max()
+
+
+def _bias_training_summary(
+    group_tags: List[List[str]],
+    sample_weights: List[float],
+    selected_features: List[str],
+) -> Dict[str, object]:
+    counts: Counter[str] = Counter()
+    weighted_counts: Counter[str] = Counter()
+    for tags, weight in zip(group_tags, sample_weights):
+        for tag in tags:
+            feature, _, _ = tag.partition("=")
+            if feature in selected_features:
+                counts[tag] += 1
+                weighted_counts[tag] += float(weight)
+    return {
+        "features": selected_features,
+        "num_samples": len(group_tags),
+        "weight_min": min(sample_weights) if sample_weights else 1.0,
+        "weight_max": max(sample_weights) if sample_weights else 1.0,
+        "weight_mean": sum(sample_weights) / max(1, len(sample_weights)),
+        "groups": {
+            tag: {
+                "num_samples": counts[tag],
+                "weighted_count": float(weighted_counts[tag]),
+            }
+            for tag in sorted(counts)
+        },
+    }
 
 
 def _contrastive_group_loss(

@@ -18,9 +18,13 @@ class FactVerificationDataset(Dataset):
         self,
         samples: List[FactSample],
         proxy_builder: ProxyBuilder,
+        sample_weights: List[float] | None = None,
+        sample_bias_groups: List[List[str]] | None = None,
     ) -> None:
         self.samples = samples
         self.proxy_builder = proxy_builder
+        self.sample_weights = sample_weights or [1.0] * len(samples)
+        self.sample_bias_groups = sample_bias_groups or [[] for _ in samples]
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -38,6 +42,8 @@ class FactVerificationDataset(Dataset):
             "contrast_group": str((sample.metadata or {}).get("contrast_group", "")),
             "contrast_role": str((sample.metadata or {}).get("contrast_role", "")),
             "sample_id": sample.sample_id,
+            "bias_weight": float(self.sample_weights[idx]),
+            "bias_groups": list(self.sample_bias_groups[idx]),
         }
 
 
@@ -63,6 +69,8 @@ class Collator:
         encoded["contrast_groups"] = [str(x["contrast_group"]) for x in batch]
         encoded["contrast_roles"] = [str(x["contrast_role"]) for x in batch]
         encoded["sample_ids"] = [str(x["sample_id"]) for x in batch]
+        encoded["bias_weights"] = torch.tensor([float(x["bias_weight"]) for x in batch], dtype=torch.float)
+        encoded["bias_groups"] = [list(x["bias_groups"]) for x in batch]
         return encoded
 
 

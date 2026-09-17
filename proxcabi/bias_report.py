@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-import math
-from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -12,11 +10,11 @@ from sklearn.metrics import mutual_info_score
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
+from .bias_groups import claim_bias_groups, label_lmi_terms
 from .data import LABELS, FactSample, load_samples
 from .metrics import classification_metrics
 from .model import ProxCABIModel
 from .proxies import ProxyBuilder
-from .text_features import negation_bucket, token_set
 from .train import _loader, _threshold_predictions, _to_device, _weighted_scores
 
 
@@ -44,8 +42,8 @@ def run_bias_report(
 
     train_samples = load_samples(data_dir, dataset, train_split)
     samples = load_samples(data_dir, dataset, split, max_samples=max_samples)
-    label_lmi = _label_lmi_terms(train_samples, lmi_top_k_per_label, lmi_min_count)
-    groups = _claim_bias_groups(samples, label_lmi)
+    label_lmi = label_lmi_terms(train_samples, lmi_top_k_per_label, lmi_min_count)
+    groups = claim_bias_groups(samples, label_lmi)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ProxCABIModel(
@@ -185,65 +183,6 @@ def _fit_binary_calibration(collected: Dict[str, object], grid_steps: int = 10, 
         "calibration_accuracy": best_accuracy,
         "calibration_macro_f1": best_score,
     }
-
-
-def _claim_bias_groups(samples: Sequence[FactSample], label_lmi: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    return {
-        "claim_negation": [negation_bucket(sample.claim) for sample in samples],
-        "claim_label_lmi": [_label_lmi_group(sample.claim, label_lmi) for sample in samples],
-        "claim_evidence_lexical_overlap": [_overlap_bucket(sample.claim, sample.evidence) for sample in samples],
-    }
-
-
-def _label_lmi_terms(samples: Sequence[FactSample], top_k_per_label: int, min_count: int) -> Dict[str, List[str]]:
-    token_counts: Counter[str] = Counter()
-    label_counts: Counter[str] = Counter()
-    joint_counts: Counter[tuple[str, str]] = Counter()
-    for sample in samples:
-        toks = token_set(sample.claim)
-        label_counts[sample.label] += 1
-        token_counts.update(toks)
-        joint_counts.update((tok, sample.label) for tok in toks)
-    total = max(1, len(samples))
-    by_label: Dict[str, List[tuple[str, float]]] = defaultdict(list)
-    for (tok, label), count in joint_counts.items():
-        if token_counts[tok] < min_count:
-            continue
-        p_tok_label = count / total
-        p_tok = token_counts[tok] / total
-        p_label = label_counts[label] / total
-        if p_tok_label > 0 and p_tok > 0 and p_label > 0:
-            score = p_tok_label * math.log(p_tok_label / (p_tok * p_label))
-            by_label[label].append((tok, score))
-    return {
-        label: [tok for tok, _ in sorted(values, key=lambda item: (-item[1], item[0]))[:top_k_per_label]]
-        for label, values in by_label.items()
-    }
-
-
-def _label_lmi_group(claim: str, label_lmi: Dict[str, List[str]]) -> str:
-    toks = token_set(claim)
-    matched = [label for label, terms in label_lmi.items() if toks.intersection(terms)]
-    if not matched:
-        return "lmi_none"
-    if len(matched) == 1:
-        return f"lmi_{matched[0].replace(' ', '_')}"
-    return "lmi_multi"
-
-
-def _overlap_bucket(claim: str, evidence: str) -> str:
-    claim_tokens = token_set(claim)
-    evidence_tokens = token_set(evidence)
-    if not claim_tokens or not evidence_tokens:
-        return "overlap_empty"
-    score = len(claim_tokens & evidence_tokens) / len(claim_tokens | evidence_tokens)
-    if score <= 0.05:
-        return "overlap_very_low"
-    if score <= 0.15:
-        return "overlap_low"
-    if score <= 0.30:
-        return "overlap_mid"
-    return "overlap_high"
 
 
 def _delta_bias_for_feature(

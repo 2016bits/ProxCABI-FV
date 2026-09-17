@@ -150,6 +150,14 @@ The default teacher is `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`; override 
 bash run_scripts/run_fever_deberta_hard_nli_proximal_contrastive.sh
 ```
 
+To target the residual claim-bias groups found by the bias report, train the DeBERTa hard-NLI setting with claim-bias reweighting and GroupDRO:
+
+```bash
+bash run_scripts/train_fever_deberta_bias_group_dro.sh
+```
+
+This keeps the same backbone, train/dev split, hard-NLI counterfactual split, and contrastive objective as the main FEVER setting, but adds `--bias-reweighting` and `--group-dro-weight`. By default it upweights fragile claim-side groups (`neg1`/`neg2p`, `lmi_none`/`lmi_refutes`, and `overlap_very_low`) and optimizes the worst in-batch bias-group supervised loss. The script evaluates FEVER dev, symmetric-FEVER, and then reruns the claim-bias `delta_bias` report.
+
 Train PolitiHop and evaluate symmetric-PolitiHop:
 
 ```bash

@@ -113,6 +113,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--disable-z-proxy", action="store_true")
     p.add_argument("--disable-w-proxy", action="store_true")
     p.add_argument("--selection-head", choices=["fact", "g", "proximal"], default="proximal")
+    p.add_argument("--bias-reweighting", action="store_true")
+    p.add_argument("--bias-reweight-factor", type=float, default=1.5)
+    p.add_argument("--group-dro-weight", type=float, default=0.0)
+    p.add_argument(
+        "--bias-features",
+        default="claim_negation,claim_label_lmi,claim_evidence_lexical_overlap",
+        help="Comma-separated bias features or aliases: negation,lmi,overlap.",
+    )
+    p.add_argument("--bias-lmi-top-k-per-label", type=int, default=32)
+    p.add_argument("--bias-lmi-min-count", type=int, default=5)
 
     p = sub.add_parser("evaluate", help="Evaluate a saved ProxCABI-FV checkpoint")
     p.add_argument("--checkpoint-dir", type=Path, required=True)
