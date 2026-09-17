@@ -190,6 +190,50 @@ def build_fever_counterfactuals(
     return stats
 
 
+def build_fever_random_counterfactuals(
+    data_dir: Path,
+    source_split: str,
+    output_split: str,
+    max_groups: Optional[int] = None,
+    seed: int = 13,
+) -> Dict[str, object]:
+    samples = load_samples(data_dir, "FEVER", source_split)
+    by_label = {
+        "supports": [sample for sample in samples if sample.label == "supports"],
+        "refutes": [sample for sample in samples if sample.label == "refutes"],
+    }
+    if not by_label["supports"] or not by_label["refutes"]:
+        raise ValueError("random-CF control requires both supports and refutes samples")
+
+    rng = random.Random(seed)
+    num_groups = max_groups or min(len(by_label["supports"]), len(by_label["refutes"]))
+    rows: List[Dict[str, object]] = []
+    for group_index in range(num_groups):
+        support = rng.choice(by_label["supports"])
+        refute = rng.choice(by_label["refutes"])
+        base_id = f"random_cf_{source_split}_{group_index:06d}"
+        rows.append(_random_control_row(base_id, "random_support", support, output_split))
+        rows.append(_random_control_row(base_id, "random_refute", refute, output_split))
+
+    converted = data_dir / "FEVER" / "converted_data"
+    converted.mkdir(parents=True, exist_ok=True)
+    out_path = converted / f"{output_split}.json"
+    out_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    stats = {
+        "source_split": source_split,
+        "output_split": output_split,
+        "output_path": str(out_path),
+        "num_source_samples": len(samples),
+        "num_groups": num_groups,
+        "num_rows": len(rows),
+        "mode": "random_control",
+    }
+    stats_dir = converted / "counterfactual_stats"
+    stats_dir.mkdir(parents=True, exist_ok=True)
+    (stats_dir / f"{output_split}.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    return stats
+
+
 def _choose_group(
     sample: FactSample,
     output_split: str,
@@ -603,6 +647,28 @@ def _row(
         "label": label,
         "num_hops": num_hops,
         "metadata": row_metadata,
+    }
+
+
+def _random_control_row(base_id: str, role: str, sample: FactSample, split: str) -> Dict[str, object]:
+    metadata = {
+        **(sample.metadata or {}),
+        "dataset": "FEVER",
+        "source_split": sample.split,
+        "source_id": sample.sample_id,
+        "revision_type": "counterfactual_random",
+        "contrast_group": base_id,
+        "contrast_role": role,
+        "counterfactual_mode": "random_control",
+        "split": split,
+    }
+    return {
+        "id": f"{base_id}_{role}_{sample.sample_id}",
+        "claim": sample.claim,
+        "evidence": sample.evidence,
+        "label": sample.label,
+        "num_hops": sample.num_hops,
+        "metadata": metadata,
     }
 
 

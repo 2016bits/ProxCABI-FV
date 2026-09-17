@@ -59,6 +59,10 @@ def train(
     class_weight_power: float = 1.0,
     contrastive_weight: float = 0.0,
     contrastive_margin: float = 1.0,
+    contrastive_heads: str = "fact,g,proximal",
+    disable_z_proxy: bool = False,
+    disable_w_proxy: bool = False,
+    selection_head: str = "proximal",
 ) -> Dict[str, object]:
     set_seed(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -99,6 +103,8 @@ def train(
         num_labels=len(LABELS),
         z_buckets=z_buckets,
         w_buckets=w_buckets,
+        use_z_proxy=not disable_z_proxy,
+        use_w_proxy=not disable_w_proxy,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -121,6 +127,9 @@ def train(
     best_metric = -1.0
     history: List[Dict[str, object]] = []
     global_step = 0
+    if selection_head not in {"fact", "g", "proximal"}:
+        raise ValueError("selection_head must be one of: fact, g, proximal")
+    contrastive_head_names = _parse_head_names(contrastive_heads)
     for epoch in range(epochs):
         model.train()
         optimizer.zero_grad(set_to_none=True)
@@ -146,6 +155,7 @@ def train(
                     batch["labels"],
                     batch.get("contrast_groups", []),
                     contrastive_margin,
+                    contrastive_head_names,
                 )
                 total_loss = out["loss"] + contrastive_weight * contrastive_loss
                 if not torch.isfinite(total_loss):
@@ -173,10 +183,20 @@ def train(
         history.append(metrics)
         with (output_dir / "metrics.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(metrics) + "\n")
-        score = float(metrics["proximal"]["macro_f1"])
+        score = float(metrics[selection_head]["macro_f1"])
         if score > best_metric:
             best_metric = score
-            _save_checkpoint(model, output_dir / "best_model.pt", backbone, proxy_builder, metrics)
+            _save_checkpoint(
+                model,
+                output_dir / "best_model.pt",
+                backbone,
+                proxy_builder,
+                metrics,
+                {
+                    "use_z_proxy": not disable_z_proxy,
+                    "use_w_proxy": not disable_w_proxy,
+                },
+            )
 
     final = {
         "best_macro_f1": best_metric,
@@ -188,6 +208,10 @@ def train(
         "num_counterfactual_samples": len(counterfactual_samples),
         "contrastive_weight": contrastive_weight,
         "contrastive_margin": contrastive_margin,
+        "contrastive_heads": sorted(contrastive_head_names),
+        "disable_z_proxy": disable_z_proxy,
+        "disable_w_proxy": disable_w_proxy,
+        "selection_head": selection_head,
         "history": history,
     }
     (output_dir / "train_summary.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -220,6 +244,7 @@ def evaluate_checkpoint(
         num_labels=len(LABELS),
         z_buckets=proxy_builder.z_buckets,
         w_buckets=proxy_builder.w_buckets,
+        **ckpt.get("model_config", {}),
     )
     model.load_state_dict(ckpt["model_state"])
     model.to(device)
@@ -364,13 +389,29 @@ def _contrastive_group_loss(
     labels: torch.Tensor,
     contrast_groups: List[str],
     margin: float,
+    heads: set[str],
 ) -> torch.Tensor:
-    if not contrast_groups:
+    if not contrast_groups or not heads:
         return fact_logits.sum() * 0.0
-    fact_loss = _contrastive_loss_for_logits(fact_logits, labels, contrast_groups, margin)
-    g_loss = _contrastive_loss_for_logits(g_logits, labels, contrast_groups, margin)
-    prox_loss = _contrastive_loss_for_logits(prox_logits, labels, contrast_groups, margin)
-    return (fact_loss + g_loss + prox_loss) / 3.0
+    losses = []
+    if "fact" in heads:
+        losses.append(_contrastive_loss_for_logits(fact_logits, labels, contrast_groups, margin))
+    if "g" in heads:
+        losses.append(_contrastive_loss_for_logits(g_logits, labels, contrast_groups, margin))
+    if "proximal" in heads:
+        losses.append(_contrastive_loss_for_logits(prox_logits, labels, contrast_groups, margin))
+    if not losses:
+        return fact_logits.sum() * 0.0
+    return torch.stack(losses).mean()
+
+
+def _parse_head_names(value: str) -> set[str]:
+    allowed = {"fact", "g", "proximal"}
+    heads = {item.strip() for item in value.split(",") if item.strip()}
+    unknown = heads - allowed
+    if unknown:
+        raise ValueError(f"Unknown head(s): {', '.join(sorted(unknown))}. Expected any of: {', '.join(sorted(allowed))}.")
+    return heads
 
 
 def _contrastive_loss_for_logits(
@@ -593,11 +634,13 @@ def _save_checkpoint(
     backbone: str,
     proxy_builder: ProxyBuilder,
     metrics: Dict[str, object],
+    model_config: Optional[Dict[str, object]] = None,
 ) -> None:
     torch.save(
         {
             "backbone": backbone,
             "model_state": model.state_dict(),
+            "model_config": model_config or {},
             "proxy_builder": proxy_builder.to_dict(),
             "metrics": metrics,
         },

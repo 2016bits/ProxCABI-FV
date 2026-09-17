@@ -52,6 +52,8 @@ class ProxCABIModel(nn.Module):
         w_buckets: int,
         proxy_dim: int = 64,
         dropout: float = 0.1,
+        use_z_proxy: bool = True,
+        use_w_proxy: bool = True,
     ) -> None:
         super().__init__()
         self.encoder = _load_auto_model(backbone_name)
@@ -64,6 +66,8 @@ class ProxCABIModel(nn.Module):
         self.h_head = MLP(hidden + proxy_dim, hidden, num_labels, dropout)
         self.num_labels = num_labels
         self.w_buckets = w_buckets
+        self.use_z_proxy = use_z_proxy
+        self.use_w_proxy = use_w_proxy
 
     def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         output = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
@@ -78,6 +82,8 @@ class ProxCABIModel(nn.Module):
         batch = m.size(0)
         w_ids = torch.arange(self.w_buckets, device=m.device)
         w_emb = self.w_embeddings(w_ids)
+        if not self.use_w_proxy:
+            w_emb = torch.zeros_like(w_emb)
         m_rep = m.unsqueeze(1).expand(batch, self.w_buckets, m.size(-1))
         w_rep = w_emb.unsqueeze(0).expand(batch, self.w_buckets, w_emb.size(-1))
         h_in = torch.cat([m_rep, w_rep], dim=-1)
@@ -95,6 +101,8 @@ class ProxCABIModel(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         m = self.encode(input_ids, attention_mask)
         z_emb = self.z_embeddings(z_ids)
+        if not self.use_z_proxy:
+            z_emb = torch.zeros_like(z_emb)
         z_in = torch.cat([m, z_emb], dim=-1)
         fact_logits = self.fact_head(m)
         proxy_logits = self.proxy_head(z_in)
@@ -108,18 +116,21 @@ class ProxCABIModel(nn.Module):
         }
         if w_ids is not None:
             w_emb = self.w_embeddings(w_ids)
+            if not self.use_w_proxy:
+                w_emb = torch.zeros_like(w_emb)
             out["h_logits"] = self.h_head(torch.cat([m, w_emb], dim=-1))
 
         if labels is not None and w_ids is not None:
             weights = loss_weights or LossWeights()
             fact_loss = F.cross_entropy(fact_logits, labels, weight=label_weights)
             g_loss = F.cross_entropy(g_logits, labels, weight=label_weights)
-            proxy_loss = F.cross_entropy(proxy_logits, w_ids)
+            zero = fact_logits.sum() * 0.0
+            proxy_loss = F.cross_entropy(proxy_logits, w_ids) if self.use_w_proxy else zero
             q_w = F.softmax(proxy_logits, dim=-1)
             h_probs = F.softmax(self.h_all_w(m), dim=-1)
             bridge_probs = torch.einsum("bw,bwc->bc", q_w, h_probs)
             g_probs = F.softmax(g_logits, dim=-1)
-            bridge_loss = js_divergence(g_probs, bridge_probs).mean()
+            bridge_loss = js_divergence(g_probs, bridge_probs).mean() if self.use_w_proxy else zero
             total = (
                 weights.fact * fact_loss
                 + weights.g * g_loss

@@ -49,6 +49,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--teacher-batch-size", type=int, default=16)
     p.add_argument("--teacher-device")
 
+    p = sub.add_parser("build-fever-random-counterfactuals", help="Build FEVER random counterfactual-control split")
+    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--source-split", default="train")
+    p.add_argument("--output-split", default="cf_train_random")
+    p.add_argument("--max-groups", type=int)
+    p.add_argument("--seed", type=int, default=13)
+
     p = sub.add_parser("diagnose", help="Run Stage 2 proxy diagnostics")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
     p.add_argument("--output-dir", type=Path, default=Path("outputs/diagnostics"))
@@ -89,6 +96,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--class-weight-power", type=float, default=1.0)
     p.add_argument("--contrastive-weight", type=float, default=0.0)
     p.add_argument("--contrastive-margin", type=float, default=1.0)
+    p.add_argument("--contrastive-heads", default="fact,g,proximal")
+    p.add_argument("--disable-z-proxy", action="store_true")
+    p.add_argument("--disable-w-proxy", action="store_true")
+    p.add_argument("--selection-head", choices=["fact", "g", "proximal"], default="proximal")
 
     p = sub.add_parser("evaluate", help="Evaluate a saved ProxCABI-FV checkpoint")
     p.add_argument("--checkpoint-dir", type=Path, required=True)
@@ -142,6 +153,17 @@ def main() -> None:
             args.teacher_min_confidence,
             args.teacher_batch_size,
             args.teacher_device,
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "build-fever-random-counterfactuals":
+        from .counterfactuals import build_fever_random_counterfactuals
+
+        result = build_fever_random_counterfactuals(
+            args.data_dir,
+            args.source_split,
+            args.output_split,
+            args.max_groups,
+            args.seed,
         )
         print(json.dumps(result, indent=2))
     elif args.command == "diagnose":

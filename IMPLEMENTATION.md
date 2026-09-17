@@ -176,3 +176,30 @@ python -m proxcabi train \
 python -m proxcabi evaluate --checkpoint-dir outputs/vitaminc_roberta --data-dir data --dataset VitaminC --split test_real
 python -m proxcabi evaluate --checkpoint-dir outputs/vitaminc_roberta --data-dir data --dataset VitaminC --split test_synthetic
 ```
+
+FEVER ablations for the DeBERTa hard-NLI setting:
+
+```bash
+bash run_scripts/run_fever_deberta_ablation_suite.sh
+```
+
+To run one ablation at a time:
+
+```bash
+bash run_scripts/build_fever_ablation_counterfactuals.sh
+bash run_scripts/train_fever_deberta_ablation.sh no_z
+bash run_scripts/train_fever_deberta_ablation.sh no_w
+bash run_scripts/train_fever_deberta_ablation.sh no_bridge_prox
+bash run_scripts/train_fever_deberta_ablation.sh no_cf
+bash run_scripts/train_fever_deberta_ablation.sh random_cf
+bash run_scripts/train_fever_deberta_ablation.sh easy_cf
+```
+
+Definitions:
+
+- `no_z`: zeroes the treatment-side proxy variable Z before the proxy and g heads.
+- `no_w`: removes the outcome proxy W from h/proximal training, disables proxy/bridge loss, and selects checkpoints by the g head.
+- `no_bridge_prox`: keeps the model structure but disables proxy/bridge/proximal contrastive objectives and selects checkpoints by the g head.
+- `no_cf`: trains without counterfactual augmentation.
+- `random_cf`: replaces hard-NLI counterfactuals with random support/refute control groups at the same 15k-row scale.
+- `easy_cf`: replaces hard-NLI counterfactuals with basic lexical counterfactuals at the same 15k-row scale, without hard negation/exclusivity edits or NLI filtering.
