@@ -13,7 +13,7 @@ This repository now contains a runnable Python reference implementation for the 
 | --- | --- |
 | Stage 0 Bias Audit | `python -m proxcabi audit` writes label, length, negation, LMI, syntax/entity, hop and metadata summaries. |
 | Stage 1 Proxy Construction | `ProxyBuilder` in `proxcabi/proxies.py` builds dataset-specific discrete `Z` and `W` proxies. |
-| Stage 2 Proxy Diagnostics | `python -m proxcabi diagnose` computes `I(Z;Y)`, `I(W;Y)`, `I(Z;W)`, `Delta_proxy`, and shuffled-Z comparison. |
+| Stage 2 Proxy Diagnostics | `python -m proxcabi diagnose` computes `I(Z;Y)`, `I(W;Y)`, `I(Z;W)`, `Delta_proxy`, and shuffled-Z comparison; `python -m proxcabi prove-proxies` adds proxy-quality, conditional-independence, and bridge-residual proof tables. |
 | Stage 3 Semantic Encoder | `ProxCABIModel.encoder` wraps HuggingFace RoBERTa/DeBERTa-style models. |
 | Stage 4 Proxy Conditional Model | `proxy_head` estimates `q(W | M,Z)` with cross entropy. |
 | Stage 5 Bridge Learning | `g_head`, `h_head`, and JS bridge loss enforce `g(M,Z) ~= E[h(M,W)|M,Z]`. |
@@ -72,6 +72,18 @@ python -m proxcabi diagnose --data-dir data --dataset HOVER --split train --max-
 python -m proxcabi diagnose --data-dir data --dataset PolitiHop --split train
 python -m proxcabi diagnose --data-dir data --dataset VitaminC --split train --max-samples 5000
 ```
+
+Run proxy validity proof diagnostics:
+
+```bash
+bash run_scripts/prove_fever_proxies.sh
+```
+
+This writes `outputs/proxy_proof/FEVER_train_proxy_proof.json` and `.md`. By default the script uses a label-balanced `MAX_SAMPLES=3000`, `BRIDGE_MAX_EVAL_SAMPLES=500`, and `BRIDGE_MAX_W_CLASSES=64`; override these environment variables for a larger proof run. It compares `random`, `shuffle`, `learned`, and `prox_cabi` proxies with three checks:
+
+- Proxy quality: reports how well `Z -> B_z` and `W -> B_w` reconstruct interpretable bias/artifact attributes, using adjusted MI and held-out majority reconstruction accuracy.
+- Conditional independence: approximates `I(Z;Y | X,W)` with classifier probes by comparing `X+W` versus `X+W+Z`; small delta means Z is not directly leaking the label after conditioning on X and W.
+- Bridge residual: fits shallow probes for `E[Y|Z,X]`, `q(W|Z,X)`, and `h(W,X)`, then reports `|| E[Y|Z,X] - E[h(W,X)|Z,X] ||` for each proxy type.
 
 Train FEVER and evaluate symmetric-FEVER:
 

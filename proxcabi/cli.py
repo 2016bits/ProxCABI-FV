@@ -65,6 +65,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--z-buckets", type=int, default=256)
     p.add_argument("--w-buckets", type=int, default=256)
 
+    p = sub.add_parser("prove-proxies", help="Run proxy validity proof diagnostics")
+    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--output-dir", type=Path, default=Path("outputs/proxy_proof"))
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--split", default="train")
+    p.add_argument("--max-samples", type=int, default=5000)
+    p.add_argument("--z-buckets", type=int, default=256)
+    p.add_argument("--w-buckets", type=int, default=256)
+    p.add_argument("--seed", type=int, default=13)
+    p.add_argument("--bridge-max-eval-samples", type=int, default=1000)
+    p.add_argument("--bridge-max-w-classes", type=int, default=128)
+    p.add_argument("--balanced-sample", action="store_true")
+
     p = sub.add_parser("train", help="Train ProxCABI-FV")
     p.add_argument("--config", type=Path, help="Optional YAML config. CLI arguments override it.")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -178,6 +191,23 @@ def main() -> None:
             args.z_buckets,
             args.w_buckets,
         )
+    elif args.command == "prove-proxies":
+        from .proxy_proof import prove_proxies
+
+        result = prove_proxies(
+            args.data_dir,
+            args.output_dir,
+            args.dataset,
+            args.split,
+            args.max_samples,
+            args.z_buckets,
+            args.w_buckets,
+            args.seed,
+            args.bridge_max_eval_samples,
+            args.bridge_max_w_classes,
+            args.balanced_sample,
+        )
+        print(json.dumps(result, indent=2))
     elif args.command == "train":
         from .train import train
 
