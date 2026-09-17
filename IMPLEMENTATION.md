@@ -85,6 +85,20 @@ This writes `outputs/proxy_proof/FEVER_train_proxy_proof.json` and `.md`. By def
 - Conditional independence: approximates `I(Z;Y | X,W)` with classifier probes by comparing `X+W` versus `X+W+Z`; small delta means Z is not directly leaking the label after conditioning on X and W.
 - Bridge residual: fits shallow probes for `E[Y|Z,X]`, `q(W|Z,X)`, and `h(W,X)`, then reports `|| E[Y|Z,X] - E[h(W,X)|Z,X] ||` for each proxy type.
 
+Run claim-bias grouped robustness reporting:
+
+```bash
+bash run_scripts/report_fever_bias_groups.sh
+```
+
+This writes `outputs/bias_report/FEVER_symmetric_bias_report.json` and `.md`. It groups evaluation examples by claim-side bias features and reports `delta_bias`, defined as the best-group minus worst-group performance gap, for each prediction head:
+
+- Claim negation bucket: whether the claim contains explicit negation cues.
+- Claim label-LMI bucket: whether the claim contains high-LMI tokens from FEVER train labels.
+- Claim/evidence lexical overlap bucket: Jaccard overlap buckets computed from claim and evidence tokens.
+
+Lower `delta_bias_accuracy` and `delta_bias_macro_f1` indicate less sensitivity to the measured claim-bias feature.
+
 Train FEVER and evaluate symmetric-FEVER:
 
 ```bash

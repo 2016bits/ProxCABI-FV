@@ -126,6 +126,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--calibration-grid-steps", type=int, default=5)
     p.add_argument("--calibration-quantiles", type=int, default=199)
     p.add_argument("--fever-symmetric-group-decode", action="store_true")
+
+    p = sub.add_parser("bias-report", help="Report delta_bias across claim-side bias groups")
+    p.add_argument("--checkpoint-dir", type=Path, required=True)
+    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--split", required=True)
+    p.add_argument("--output-dir", type=Path, default=Path("outputs/bias_report"))
+    p.add_argument("--train-split", default="train")
+    p.add_argument("--calibration-split")
+    p.add_argument("--max-samples", type=int)
+    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--max-length", type=int, default=256)
+    p.add_argument("--lmi-top-k-per-label", type=int, default=32)
+    p.add_argument("--lmi-min-count", type=int, default=5)
+    p.add_argument("--min-group-size", type=int, default=20)
     return parser
 
 
@@ -229,6 +244,25 @@ def main() -> None:
             args.calibration_grid_steps,
             args.calibration_quantiles,
             args.fever_symmetric_group_decode,
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "bias-report":
+        from .bias_report import run_bias_report
+
+        result = run_bias_report(
+            args.checkpoint_dir,
+            args.data_dir,
+            args.dataset,
+            args.split,
+            args.output_dir,
+            args.train_split,
+            args.calibration_split,
+            args.max_samples,
+            args.batch_size,
+            args.max_length,
+            args.lmi_top_k_per_label,
+            args.lmi_min_count,
+            args.min_group_size,
         )
         print(json.dumps(result, indent=2))
 
