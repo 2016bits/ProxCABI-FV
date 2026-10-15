@@ -1,0 +1,11 @@
+mode: real_strict
+seed: 13
+output_dir: outputs/plan_a/effect_guided
+weighting:
+  method: proximal
+  kappa: 1.0
+  max_weight: 5.0
+  epsilon: 0.00000001
+training:
+  invariant_loss_weight: 0.2
+  semantic_change_loss_weight: 1.0

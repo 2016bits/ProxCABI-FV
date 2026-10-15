@@ -1,0 +1,26 @@
+mode: synthetic_strict
+seed: 13
+output_dir: outputs/plan_a/synthetic_neural_smoke
+scm:
+  n: 20000
+  p_u: 0.5
+  z_accuracy: 0.85
+  w_accuracy: 0.85
+  p_a_u0: 0.2
+  p_a_u1: 0.8
+  beta: 0.3
+  delta: 0.8
+  noise_std: 0.1
+bridge:
+  method: neural
+  min_cell: 20
+  ridge: 0.000001
+  min_singular_value: 0.001
+  neural:
+    epochs: 300
+    lr: 0.01
+    patience: 50
+    emb_dim: 8
+    hidden_dim: 32
+report:
+  bootstrap_reps: 0

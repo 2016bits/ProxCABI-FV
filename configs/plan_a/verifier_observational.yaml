@@ -1,0 +1,23 @@
+mode: real_strict
+seed: 13
+output_dir: outputs/plan_a/real_strict
+verifier:
+  checkpoint_dir: outputs/fever_roberta
+  head: fact
+  outcome: nll
+  max_length: 256
+causal_data:
+  observations_path: data/causal_audit/fever_observational.csv
+  proxy_protocol_path: data/causal_audit/proxy_protocol.yaml
+  treatment_protocol_path: data/causal_audit/treatment_protocol.md
+  split_group_key: semantic_group
+bridge:
+  method: discrete
+  min_cell: 25
+  ridge: 0.0001
+  min_singular_value: 0.001
+  crossfit_folds: 3
+assumptions:
+  require_independent_pre_treatment_proxy: true
+  require_exclusion_argument: true
+  abort_on_known_violation: true

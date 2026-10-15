@@ -2,6 +2,72 @@
 
 **Proximal Causal Attribute Bias Intervention for Fact Verification**
 
+## Plan A causal-effect pipeline
+
+The strict causal-effect implementation is isolated under `proxcabi.causal`; it does not
+reinterpret the legacy text-derived proxy heads as a causal outcome bridge. A complete
+CPU-only synthetic smoke run is:
+
+```bash
+bash run_scripts/plan_a_synthetic_smoke.sh
+```
+
+Run the complete tested reference pipeline (discrete bridge, stress grid, neural bridge,
+effect-guided weights, and output assertions) with:
+
+```bash
+bash run_scripts/run_plan_a_all.sh
+```
+
+After the synthetic gates pass, run the frozen FEVER verifier on held-out hard-NLI
+counterfactual pairs and report exploratory paired effect, CCR, and SSR with:
+
+```bash
+bash run_scripts/run_plan_a_real_exploratory.sh
+```
+
+The resulting report is written under
+`outputs/plan_a/real_exploratory_fever/paired_report/`. These paired diagnostics are
+explicitly marked exploratory and are not presented as a proximal observational ATE.
+
+Run the full paper-reporting pipeline with the fixed FEVER checkpoint and leakage-safe
+evaluation protocol using:
+
+```bash
+bash run_scripts/run_plan_a_paper_experiments.sh
+```
+
+It writes paper-ready Markdown/CSV/JSON tables and a reproducibility manifest under
+`outputs/plan_a/paper_experiments/`. FEVER dev is reported without self-calibration;
+symmetric-FEVER calibration uses FEVER dev only, and symmetric-FEVER is never used for
+training or model selection.
+
+Evaluate the fixed HoVer, PolitiHop, and VitaminC checkpoints on their complete reporting
+splits and build a cross-dataset paper table with:
+
+```bash
+bash run_scripts/run_plan_a_multidataset_paper.sh
+```
+
+This pipeline uses no test-set calibration or subsampling. It reports all fact/g/proximal
+heads, highlights the proximal head in Markdown, and includes HoVer hop and VitaminC
+revision-type subgroup metrics.
+
+It generates observed `A/Z/W/L/R` separately from oracle `U`, fits the finite-state
+outcome bridge with support/rank gates, standardizes over the unconditional target
+`P(W,L)`, bootstraps by refitting the bridge, and compares the estimate with the SCM
+truth. Run the proxy-quality and assumption stress grid with:
+
+```bash
+bash run_scripts/plan_a_synthetic_stress.sh
+```
+
+Real-data strict mode requires independent pre-treatment proxy provenance and exclusion
+arguments. `proxcabi.causal.assumptions.validate_proxy_protocol` rejects post-treatment
+text hashes in strict mode; use `real_exploratory` for descriptive analyses when those
+measurements are unavailable. Observable diagnostics are never reported as proof of
+unobservable exclusion or completeness assumptions.
+
 > A CABIN-inspired proximal causal inference framework for debiased fact verification under latent dataset-generation confounding.
 
 ---

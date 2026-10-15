@@ -70,6 +70,8 @@ def train(
     bias_features: str = "claim_negation,claim_label_lmi,claim_evidence_lexical_overlap",
     bias_lmi_top_k_per_label: int = 32,
     bias_lmi_min_count: int = 5,
+    effect_group_weights: Optional[Path] = None,
+    effect_group_key: str = "l",
 ) -> Dict[str, object]:
     set_seed(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -91,6 +93,7 @@ def train(
     proxy_builder.save(output_dir / "proxy_builder.json")
     selected_bias_features = parse_bias_features(bias_features)
     use_bias_groups = bias_reweighting or group_dro_weight > 0
+    use_weighted_training = use_bias_groups or effect_group_weights is not None
     train_bias_groups: Optional[List[List[str]]] = None
     train_bias_weights: Optional[List[float]] = None
     bias_summary: Optional[Dict[str, object]] = None
@@ -104,6 +107,24 @@ def train(
         )
         bias_summary = _bias_training_summary(train_bias_groups, train_bias_weights, selected_bias_features)
         (output_dir / "bias_training_groups.json").write_text(json.dumps(bias_summary, indent=2), encoding="utf-8")
+    if effect_group_weights is not None:
+        payload = json.loads(effect_group_weights.read_text(encoding="utf-8"))
+        if payload.get("passed_identification_gate") is not True:
+            raise ValueError("effect group weights did not pass the identification gate")
+        weights_by_group = {str(key): float(value) for key, value in payload.get("weights", {}).items()}
+        missing = [sample.sample_id for sample in train_samples
+                   if effect_group_key not in (sample.metadata or {})]
+        if missing:
+            raise ValueError(
+                f"{len(missing)} training samples lack pre-treatment metadata key "
+                f"{effect_group_key!r}; examples: {missing[:5]}"
+            )
+        effect_weights = [weights_by_group.get(str(sample.metadata[effect_group_key]), 1.0)
+                          for sample in train_samples]
+        train_bias_weights = ([a * b for a, b in zip(train_bias_weights, effect_weights)]
+                              if train_bias_weights is not None else effect_weights)
+        if train_bias_groups is None:
+            train_bias_groups = [[] for _ in train_samples]
 
     tokenizer = AutoTokenizer.from_pretrained(backbone, use_fast=True)
     tokenizer.save_pretrained(output_dir / "tokenizer")
@@ -181,7 +202,7 @@ def train(
                     contrastive_margin,
                     contrastive_head_names,
                 )
-                if use_bias_groups:
+                if use_weighted_training:
                     supervised_loss, per_sample_supervised = _bias_aware_training_loss(
                         model,
                         out,
@@ -217,7 +238,7 @@ def train(
             running.append(float(total_loss.detach().cpu()))
             if running:
                 postfix = {"loss": sum(running[-50:]) / len(running[-50:])}
-                if use_bias_groups:
+                if use_weighted_training:
                     postfix["dro"] = float(dro_loss.detach().cpu())
                 pbar.set_postfix(postfix)
 
@@ -261,6 +282,8 @@ def train(
         "group_dro_weight": group_dro_weight,
         "bias_features": selected_bias_features if use_bias_groups else [],
         "bias_training_summary": bias_summary,
+        "effect_group_weights": str(effect_group_weights) if effect_group_weights else None,
+        "effect_group_key": effect_group_key if effect_group_weights else None,
         "history": history,
     }
     (output_dir / "train_summary.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -279,6 +302,7 @@ def evaluate_checkpoint(
     calibration_grid_steps: int = 5,
     calibration_quantiles: int = 199,
     fever_symmetric_group_decode: bool = False,
+    output_dir: Optional[Path] = None,
 ) -> Dict[str, object]:
     ckpt = torch.load(checkpoint_dir / "best_model.pt", map_location="cpu")
     proxy_builder = ProxyBuilder.load(checkpoint_dir / "proxy_builder.json")
@@ -328,7 +352,9 @@ def evaluate_checkpoint(
             dataset,
             split,
         )
-    out_path = checkpoint_dir / f"eval_{dataset}_{split}.json"
+    destination = output_dir or checkpoint_dir
+    destination.mkdir(parents=True, exist_ok=True)
+    out_path = destination / f"eval_{dataset}_{split}.json"
     out_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     return metrics
 

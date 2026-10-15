@@ -123,9 +123,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--bias-lmi-top-k-per-label", type=int, default=32)
     p.add_argument("--bias-lmi-min-count", type=int, default=5)
+    p.add_argument("--effect-group-weights", type=Path,
+                   help="Gated Plan A effect_group_weights.json for stage-wise sample weighting")
+    p.add_argument("--effect-group-key", default="l",
+                   help="Pre-treatment FactSample.metadata key matching effect groups")
 
     p = sub.add_parser("evaluate", help="Evaluate a saved ProxCABI-FV checkpoint")
     p.add_argument("--checkpoint-dir", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path,
+                   help="Write evaluation JSON here instead of modifying the checkpoint directory")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
     p.add_argument("--dataset", required=True)
     p.add_argument("--split", required=True)
@@ -254,6 +260,7 @@ def main() -> None:
             args.calibration_grid_steps,
             args.calibration_quantiles,
             args.fever_symmetric_group_decode,
+            args.output_dir,
         )
         print(json.dumps(result, indent=2))
     elif args.command == "bias-report":
@@ -294,7 +301,7 @@ def _train_params(args: argparse.Namespace) -> dict:
     missing = [key for key in ("dataset", "output_dir") if not params.get(key)]
     if missing:
         raise SystemExit(f"Missing required train argument(s): {', '.join(missing)}")
-    for key in ("data_dir", "output_dir"):
+    for key in ("data_dir", "output_dir", "effect_group_weights"):
         if key in params and params[key] is not None:
             params[key] = Path(params[key])
     return params
