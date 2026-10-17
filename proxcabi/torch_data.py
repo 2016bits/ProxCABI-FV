@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import random
 from collections import defaultdict
 from typing import Dict, Iterator, List
@@ -75,14 +74,28 @@ class Collator:
 
 
 class ContrastiveBatchSampler(Sampler[List[int]]):
+    PACKING_SEED = 13
+
     def __init__(self, samples: List[FactSample], batch_size: int, shuffle: bool = True, seed: int = 13) -> None:
         self.samples = samples
         self.batch_size = max(1, batch_size)
         self.shuffle = shuffle
         self.seed = seed
+        self.epoch = 0
 
     def __iter__(self) -> Iterator[List[int]]:
-        rng = random.Random(self.seed)
+        batches = self._canonical_batches()
+        if self.shuffle:
+            # Packing is fixed across runs so every seed has the same number of
+            # optimizer steps. Only training order changes with run/epoch.
+            rng = random.Random(self.seed + self.epoch)
+            for batch in batches:
+                rng.shuffle(batch)
+            rng.shuffle(batches)
+        self.epoch += 1
+        yield from batches
+
+    def _canonical_batches(self) -> List[List[int]]:
         buckets: List[List[int]] = []
         contrast_groups: Dict[str, List[int]] = defaultdict(list)
         for index, sample in enumerate(self.samples):
@@ -93,51 +106,27 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
                 buckets.append([index])
         buckets.extend(contrast_groups.values())
         if self.shuffle:
-            rng.shuffle(buckets)
-            for bucket in buckets:
-                rng.shuffle(bucket)
+            # A seed-independent packing order prevents random seeds from
+            # changing the batch and optimizer-step budget.
+            random.Random(self.PACKING_SEED).shuffle(buckets)
 
+        batches: List[List[int]] = []
         batch: List[int] = []
         for bucket in buckets:
             if len(bucket) > self.batch_size:
                 if batch:
-                    yield batch
+                    batches.append(batch)
                     batch = []
                 for start in range(0, len(bucket), self.batch_size):
-                    yield bucket[start : start + self.batch_size]
+                    batches.append(bucket[start : start + self.batch_size])
                 continue
             if batch and len(batch) + len(bucket) > self.batch_size:
-                yield batch
+                batches.append(batch)
                 batch = []
             batch.extend(bucket)
         if batch:
-            yield batch
+            batches.append(batch)
+        return batches
 
     def __len__(self) -> int:
-        bucket_sizes: List[int] = []
-        contrast_groups: Dict[str, int] = defaultdict(int)
-        for sample in self.samples:
-            group = str((sample.metadata or {}).get("contrast_group", ""))
-            if group:
-                contrast_groups[group] += 1
-            else:
-                bucket_sizes.append(1)
-        bucket_sizes.extend(contrast_groups.values())
-        if self.shuffle:
-            random.Random(self.seed).shuffle(bucket_sizes)
-        count = 0
-        current = 0
-        for size in bucket_sizes:
-            if size > self.batch_size:
-                if current:
-                    count += 1
-                    current = 0
-                count += math.ceil(size / self.batch_size)
-                continue
-            if current and current + size > self.batch_size:
-                count += 1
-                current = 0
-            current += size
-        if current:
-            count += 1
-        return count
+        return len(self._canonical_batches())

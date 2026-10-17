@@ -94,6 +94,101 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("multidataset-report", help="Aggregate HoVer/PolitiHop/VitaminC paper tables")
     p.add_argument("--eval-dir", type=Path, required=True)
     p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("ablation-report", help="Aggregate synthetic, FEVER, and head ablations")
+    p.add_argument("--outputs-dir", type=Path, default=Path("outputs"))
+    p.add_argument("--plan-a-dir", type=Path, default=Path("outputs/plan_a"))
+    p.add_argument("--multidataset-metrics", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("multiseed-report", help="Aggregate FEVER runs across random seeds")
+    p.add_argument("--outputs-dir", type=Path, default=Path("outputs"))
+    p.add_argument("--multiseed-dir", type=Path, default=Path("outputs/fever_multiseed"))
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--variants", default="full,no_cf,no_z,no_w")
+    p.add_argument("--seeds", default="13,21,42")
+
+    p = sub.add_parser("paired-significance", help="Paired multi-seed significance on symmetric-FEVER")
+    p.add_argument("--outputs-dir", type=Path, default=Path("outputs"))
+    p.add_argument("--multiseed-dir", type=Path, default=Path("outputs/fever_multiseed"))
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--variants", default="no_cf,no_z,no_w")
+    p.add_argument("--seeds", default="13,21,42")
+    p.add_argument("--bootstrap-reps", type=int, default=5000)
+    p.add_argument("--permutation-reps", type=int, default=5000)
+    p.add_argument("--random-seed", type=int, default=2027)
+
+    p = sub.add_parser("real-text-semisynthetic", help="Known-effect recovery with real response anchors")
+    p.add_argument("--responses", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--n", type=int, default=20000)
+    p.add_argument("--seeds", default=",".join(str(value) for value in range(20)))
+    p.add_argument("--proxy-strengths", default="0.55,0.65,0.75,0.85,0.95")
+    p.add_argument("--bootstrap-reps", type=int, default=30)
+
+    p = sub.add_parser("neural-real-text-semisynthetic", help="Neural bridge recovery with real anchors")
+    p.add_argument("--responses", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--n", type=int, default=20000)
+    p.add_argument("--seeds", default="0,1,2,3,4")
+    p.add_argument("--proxy-strengths", default="0.55,0.65,0.75,0.85,0.95")
+    p.add_argument("--epochs", type=int, default=300)
+    p.add_argument("--patience", type=int, default=50)
+
+    p = sub.add_parser("www-report", help="Build an evidence-aware WWW experiment report")
+    p.add_argument("--plan-a-dir", type=Path, default=Path("outputs/plan_a"))
+    p.add_argument("--todo", type=Path, default=Path("docs/WWW_EXPERIMENT_TODO.md"))
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("real-text-sensitivity", help="Semi-synthetic overlap and violation grid")
+    p.add_argument("--responses", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--n", type=int, default=20000)
+    p.add_argument("--seeds", default=",".join(str(value) for value in range(20)))
+
+    p = sub.add_parser("effect-guided-semisynthetic", help="Known-CATE group targeting experiment")
+    p.add_argument("--responses", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--n", type=int, default=40000)
+    p.add_argument("--seeds", default=",".join(str(value) for value in range(20)))
+    p.add_argument("--proxy-accuracy", type=float, default=0.85)
+    p.add_argument("--budget-groups", type=int, default=2)
+
+    p = sub.add_parser("counterfactual-quality", help="Audit CF construction and split leakage")
+    p.add_argument("--train", type=Path, required=True)
+    p.add_argument("--dev", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("efficiency-report", help="Aggregate FEVER runtime and memory evidence")
+    p.add_argument("--multiseed-dir", type=Path, default=Path("outputs/fever_multiseed"))
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--variants", default="full,erm,cf_only,contrastive_only,reweight,group_dro")
+    p.add_argument("--seeds", default="13,21,42")
+
+    p = sub.add_parser("reproducibility-manifest", help="Hash WWW code, data, runs, and environment")
+    p.add_argument("--project-dir", type=Path, default=Path("."))
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("robustness-report", help="FEVER subgroup gaps and failure annotation sample")
+    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--multiseed-dir", type=Path, default=Path("outputs/fever_multiseed"))
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--variants", default="full,no_cf,no_z,no_w,erm,cf_only,contrastive_only,reweight,group_dro")
+    p.add_argument("--seeds", default="13,21,42")
+    p.add_argument("--error-sample-size", type=int, default=100)
+
+    p = sub.add_parser("politihop-diagnosis", help="Diagnose symmetric proximal-head degradation")
+    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--predictions", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("counterfactual-human-template", help="Build a blinded CF annotation study")
+    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--train-items", type=int, default=300)
+    p.add_argument("--dev-items", type=int, default=100)
+    p.add_argument("--annotators", type=int, default=3)
+    p.add_argument("--seed", type=int, default=2027)
     return parser
 
 
@@ -118,8 +213,36 @@ def main(argv: list[str] | None = None) -> None:
             result = _evaluate_pairs(args)
         elif args.command == "paper-report":
             result = _paper_report(args)
-        else:
+        elif args.command == "multidataset-report":
             result = _multidataset_report(args)
+        elif args.command == "ablation-report":
+            result = _ablation_report(args)
+        elif args.command == "multiseed-report":
+            result = _multiseed_report(args)
+        elif args.command == "paired-significance":
+            result = _paired_significance(args)
+        elif args.command == "real-text-semisynthetic":
+            result = _real_text_semisynthetic(args)
+        elif args.command == "real-text-sensitivity":
+            result = _real_text_sensitivity(args)
+        elif args.command == "neural-real-text-semisynthetic":
+            result = _neural_real_text_semisynthetic(args)
+        elif args.command == "www-report":
+            result = _www_report(args)
+        elif args.command == "effect-guided-semisynthetic":
+            result = _effect_guided_semisynthetic(args)
+        elif args.command == "counterfactual-quality":
+            result = _counterfactual_quality(args)
+        elif args.command == "efficiency-report":
+            result = _efficiency_report(args)
+        elif args.command == "reproducibility-manifest":
+            result = _reproducibility_manifest(args)
+        elif args.command == "robustness-report":
+            result = _robustness_report(args)
+        elif args.command == "politihop-diagnosis":
+            result = _politihop_diagnosis(args)
+        else:
+            result = _counterfactual_human_template(args)
     except (CausalError, ValueError, FileNotFoundError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
@@ -528,3 +651,165 @@ def _multidataset_report(args: argparse.Namespace) -> dict[str, Any]:
     report = build_multidataset_report(args.eval_dir, args.output_dir)
     return {"output_dir": str(args.output_dir), "num_results": len(report["results"]),
             "num_subgroups": len(report["subgroups"])}
+
+
+def _ablation_report(args: argparse.Namespace) -> dict[str, Any]:
+    from .ablation_report import build_ablation_report
+
+    report = build_ablation_report(
+        args.outputs_dir, args.plan_a_dir, args.multidataset_metrics, args.output_dir
+    )
+    return {
+        "output_dir": str(args.output_dir),
+        "synthetic_rows": len(report["synthetic_estimator_ablation"]),
+        "fever_rows": len(report["fever_retrained_structural_ablation"]),
+        "head_rows": len(report["cross_dataset_inference_head_comparison"]),
+    }
+
+
+def _multiseed_report(args: argparse.Namespace) -> dict[str, Any]:
+    from .multiseed_report import build_multiseed_report
+
+    variants = [item.strip() for item in args.variants.split(",") if item.strip()]
+    seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    report = build_multiseed_report(
+        args.outputs_dir, args.multiseed_dir, args.output_dir, variants, seeds
+    )
+    return {
+        "output_dir": str(args.output_dir),
+        "completed_runs": len(report["runs"]),
+        "missing_runs": len(report["missing_runs"]),
+        "complete": report["complete"],
+    }
+
+
+def _paired_significance(args: argparse.Namespace) -> dict[str, Any]:
+    from .paired_significance import build_paired_significance
+
+    variants = [item.strip() for item in args.variants.split(",") if item.strip()]
+    seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    report = build_paired_significance(
+        args.outputs_dir, args.multiseed_dir, args.output_dir, variants, seeds,
+        args.bootstrap_reps, args.permutation_reps, args.random_seed,
+    )
+    return {"output_dir": str(args.output_dir), "comparisons": len(report["comparisons"])}
+
+
+def _real_text_semisynthetic(args: argparse.Namespace) -> dict[str, Any]:
+    from .real_text_semisynthetic import run_real_text_semisynthetic
+
+    seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    strengths = [float(item.strip()) for item in args.proxy_strengths.split(",") if item.strip()]
+    report = run_real_text_semisynthetic(
+        args.responses, args.output_dir, n=args.n, seeds=seeds,
+        proxy_strengths=strengths, bootstrap_reps=args.bootstrap_reps,
+    )
+    return {"output_dir": str(args.output_dir), "runs": len(report["runs"]),
+            "summary_rows": len(report["summaries"])}
+
+
+def _real_text_sensitivity(args: argparse.Namespace) -> dict[str, Any]:
+    from .real_text_semisynthetic import run_real_text_sensitivity
+
+    seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    report = run_real_text_sensitivity(
+        args.responses, args.output_dir, n=args.n, seeds=seeds
+    )
+    return {"output_dir": str(args.output_dir), "runs": len(report["runs"]),
+            "summary_rows": len(report["summaries"])}
+
+
+def _neural_real_text_semisynthetic(args: argparse.Namespace) -> dict[str, Any]:
+    from .real_text_semisynthetic import run_neural_real_text_semisynthetic
+
+    seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    strengths = [float(item.strip()) for item in args.proxy_strengths.split(",") if item.strip()]
+    report = run_neural_real_text_semisynthetic(
+        args.responses, args.output_dir, n=args.n, seeds=seeds,
+        proxy_strengths=strengths, epochs=args.epochs, patience=args.patience,
+    )
+    return {"output_dir": str(args.output_dir), "runs": len(report["runs"]),
+            "summary_rows": len(report["summaries"])}
+
+
+def _www_report(args: argparse.Namespace) -> dict[str, Any]:
+    from .www_report import build_www_report
+
+    report = build_www_report(args.plan_a_dir, args.todo, args.output_dir)
+    return {"output_dir": str(args.output_dir), "stage1_complete": report["stage1_complete"],
+            "stage2_complete": report["stage2_complete"], "todo": report["todo"]}
+
+
+def _effect_guided_semisynthetic(args: argparse.Namespace) -> dict[str, Any]:
+    from .effect_guided_semisynthetic import run_effect_guided_semisynthetic
+
+    seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    report = run_effect_guided_semisynthetic(
+        args.responses, args.output_dir, n=args.n, seeds=seeds,
+        proxy_accuracy=args.proxy_accuracy, budget_groups=args.budget_groups,
+    )
+    return {"output_dir": str(args.output_dir), "runs": len(report["runs"]),
+            "summary_rows": len(report["summaries"])}
+
+
+def _counterfactual_quality(args: argparse.Namespace) -> dict[str, Any]:
+    from .counterfactual_quality import audit_counterfactual_quality
+
+    report = audit_counterfactual_quality(args.train, args.dev, args.output_dir)
+    return {"output_dir": str(args.output_dir),
+            "passed_automatic_gates": report["passed_automatic_gates"],
+            "train_rows": report["train"]["num_rows"],
+            "dev_rows": report["dev"]["num_rows"]}
+
+
+def _efficiency_report(args: argparse.Namespace) -> dict[str, Any]:
+    from .efficiency_report import build_efficiency_report
+
+    variants = [item.strip() for item in args.variants.split(",") if item.strip()]
+    seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    report = build_efficiency_report(args.multiseed_dir, args.output_dir, variants, seeds)
+    return {"output_dir": str(args.output_dir), "runs": len(report["runs"]),
+            "summary_rows": len(report["summaries"])}
+
+
+def _reproducibility_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    from .reproducibility import build_reproducibility_manifest
+
+    report = build_reproducibility_manifest(args.project_dir, args.output_dir)
+    return {"output_dir": str(args.output_dir), "code_files": len(report["code_hashes"]),
+            "data_files": len(report["data_hashes"]),
+            "run_summaries": len(report["run_summary_hashes"])}
+
+
+def _robustness_report(args: argparse.Namespace) -> dict[str, Any]:
+    from .robustness_report import build_robustness_report
+
+    variants = [item.strip() for item in args.variants.split(",") if item.strip()]
+    seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    report = build_robustness_report(
+        args.data_dir, args.multiseed_dir, args.output_dir, variants, seeds,
+        args.error_sample_size,
+    )
+    return {"output_dir": str(args.output_dir),
+            "group_rows": len(report["summary_group_metrics"]),
+            "annotation_rows": report["manual_error_annotation"]["prepared_rows"]}
+
+
+def _politihop_diagnosis(args: argparse.Namespace) -> dict[str, Any]:
+    from .politihop_diagnosis import diagnose_politihop
+
+    report = diagnose_politihop(args.data_dir, args.predictions, args.output_dir)
+    return {"output_dir": str(args.output_dir), "train_size": report["train_size"],
+            "symmetric_size": report["symmetric_size"]}
+
+
+def _counterfactual_human_template(args: argparse.Namespace) -> dict[str, Any]:
+    from .counterfactual_human import build_counterfactual_human_template
+
+    report = build_counterfactual_human_template(
+        args.data_dir, args.output_dir, args.train_items, args.dev_items,
+        args.annotators, args.seed,
+    )
+    return {"output_dir": str(args.output_dir),
+            "unique_pairs": report["num_unique_pairs"],
+            "annotation_rows": report["num_annotation_rows"]}

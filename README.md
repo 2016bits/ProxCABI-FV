@@ -42,6 +42,17 @@ It writes paper-ready Markdown/CSV/JSON tables and a reproducibility manifest un
 symmetric-FEVER calibration uses FEVER dev only, and symmetric-FEVER is never used for
 training or model selection.
 
+After the FEVER ablation checkpoints and multi-dataset experiment have completed, build
+all paper-ready ablation tables with:
+
+```bash
+bash run_scripts/run_plan_a_ablation_report.sh
+```
+
+The default mode reuses the completed checkpoints. To deliberately retrain all six
+FEVER variants first, set `RETRAIN_FEVER_ABLATIONS=1`; this is GPU-intensive. The report
+separates retrained FEVER ablations from cross-dataset inference-head comparisons.
+
 Evaluate the fixed HoVer, PolitiHop, and VitaminC checkpoints on their complete reporting
 splits and build a cross-dataset paper table with:
 
@@ -52,6 +63,19 @@ bash run_scripts/run_plan_a_multidataset_paper.sh
 This pipeline uses no test-set calibration or subsampling. It reports all fact/g/proximal
 heads, highlights the proximal head in Markdown, and includes HoVer hop and VitaminC
 revision-type subgroup metrics.
+
+For the WWW submission protocol, run all three-seed FEVER structural ablations and
+matched baselines on two GPUs, then build significance, efficiency, environment, and
+paper-facing reports with:
+
+```bash
+GPU_A=0 GPU_B=7 bash run_scripts/run_plan_a_www_submission.sh
+```
+
+This command is resumable after a fully completed training run and never reuses the
+legacy seed-13 checkpoints, whose schedules are not identical to the WWW protocol.
+The live checklist is `docs/WWW_EXPERIMENT_TODO.md`; final tables are written below
+`outputs/plan_a/`.
 
 It generates observed `A/Z/W/L/R` separately from oracle `U`, fits the finite-state
 outcome bridge with support/rank gates, standardizes over the unconditional target

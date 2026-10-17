@@ -4,6 +4,7 @@ import json
 import math
 import random
 import re
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -67,15 +68,19 @@ def train(
     bias_reweighting: bool = False,
     bias_reweight_factor: float = 1.5,
     group_dro_weight: float = 0.0,
+    group_dro_heads: str = "fact,g,proximal",
     bias_features: str = "claim_negation,claim_label_lmi,claim_evidence_lexical_overlap",
     bias_lmi_top_k_per_label: int = 32,
     bias_lmi_min_count: int = 5,
     effect_group_weights: Optional[Path] = None,
     effect_group_key: str = "l",
 ) -> Dict[str, object]:
+    training_started = time.perf_counter()
     set_seed(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     train_samples = load_samples(data_dir, dataset, train_split, max_samples=max_train_samples)
     num_base_train_samples = len(train_samples)
@@ -175,6 +180,7 @@ def train(
     if selection_head not in {"fact", "g", "proximal"}:
         raise ValueError("selection_head must be one of: fact, g, proximal")
     contrastive_head_names = _parse_head_names(contrastive_heads)
+    group_dro_head_names = _parse_head_names(group_dro_heads)
     for epoch in range(epochs):
         model.train()
         optimizer.zero_grad(set_to_none=True)
@@ -210,6 +216,7 @@ def train(
                         batch,
                         loss_weights,
                         label_weights,
+                        group_dro_head_names,
                     )
                     dro_loss = _group_dro_loss(
                         per_sample_supervised,
@@ -264,26 +271,64 @@ def train(
             )
 
     final = {
+        "seed": seed,
+        "backbone": backbone,
+        "train_split": train_split,
+        "eval_split": eval_split,
+        "epochs": epochs,
+        "learning_rate": lr,
+        "weight_decay": weight_decay,
+        "warmup_ratio": warmup_ratio,
+        "max_length": max_length,
+        "batch_size": batch_size,
+        "eval_batch_size": eval_batch_size,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "batches_per_epoch": len(train_loader),
+        "optimizer_steps_per_epoch": steps_per_epoch,
+        "scheduled_optimizer_steps": total_steps,
+        "contrastive_batch_packing_seed": (
+            ContrastiveBatchSampler.PACKING_SEED if contrastive_weight > 0 else None
+        ),
         "best_macro_f1": best_metric,
         "balanced_loss": balanced_loss,
+        "fp16": fp16,
+        "optimizer": "AdamW",
+        "num_parameters": sum(parameter.numel() for parameter in model.parameters()),
+        "num_trainable_parameters": sum(
+            parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+        ),
         "class_weight_power": class_weight_power if balanced_loss else None,
         "class_weights": label_weights.detach().cpu().tolist() if label_weights is not None else None,
+        "max_train_samples": max_train_samples,
+        "max_eval_samples": max_eval_samples,
         "counterfactual_split": counterfactual_split,
+        "max_counterfactual_samples": max_counterfactual_samples,
         "num_base_train_samples": num_base_train_samples,
         "num_counterfactual_samples": len(counterfactual_samples),
         "contrastive_weight": contrastive_weight,
         "contrastive_margin": contrastive_margin,
         "contrastive_heads": sorted(contrastive_head_names),
+        "proxy_weight": proxy_weight,
+        "bridge_weight": bridge_weight,
+        "g_weight": g_weight,
+        "z_buckets": z_buckets,
+        "w_buckets": w_buckets,
         "disable_z_proxy": disable_z_proxy,
         "disable_w_proxy": disable_w_proxy,
         "selection_head": selection_head,
         "bias_reweighting": bias_reweighting,
         "bias_reweight_factor": bias_reweight_factor if bias_reweighting else None,
         "group_dro_weight": group_dro_weight,
+        "group_dro_heads": sorted(group_dro_head_names),
         "bias_features": selected_bias_features if use_bias_groups else [],
+        "bias_lmi_top_k_per_label": bias_lmi_top_k_per_label if use_bias_groups else None,
+        "bias_lmi_min_count": bias_lmi_min_count if use_bias_groups else None,
         "bias_training_summary": bias_summary,
         "effect_group_weights": str(effect_group_weights) if effect_group_weights else None,
         "effect_group_key": effect_group_key if effect_group_weights else None,
+        "training_wall_seconds": time.perf_counter() - training_started,
+        "peak_gpu_memory_bytes": (torch.cuda.max_memory_allocated(device)
+                                  if device.type == "cuda" else None),
         "history": history,
     }
     (output_dir / "train_summary.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
@@ -303,7 +348,9 @@ def evaluate_checkpoint(
     calibration_quantiles: int = 199,
     fever_symmetric_group_decode: bool = False,
     output_dir: Optional[Path] = None,
+    save_predictions: bool = False,
 ) -> Dict[str, object]:
+    evaluation_started = time.perf_counter()
     ckpt = torch.load(checkpoint_dir / "best_model.pt", map_location="cpu")
     proxy_builder = ProxyBuilder.load(checkpoint_dir / "proxy_builder.json")
     backbone = ckpt["backbone"]
@@ -321,7 +368,16 @@ def evaluate_checkpoint(
     )
     model.load_state_dict(ckpt["model_state"])
     model.to(device)
-    metrics = evaluate_model(model, loader, proxy_builder, device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    prediction_rows: Optional[List[Dict[str, object]]] = [] if save_predictions else None
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    inference_started = time.perf_counter()
+    metrics = evaluate_model(model, loader, proxy_builder, device, prediction_rows)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    inference_seconds = time.perf_counter() - inference_started
     if calibration_split:
         calibration_samples = load_samples(data_dir, dataset, calibration_split, max_samples=max_samples)
         calibration_loader = _loader(
@@ -352,10 +408,41 @@ def evaluate_checkpoint(
             dataset,
             split,
         )
+    evaluation_seconds = time.perf_counter() - evaluation_started
+    metrics["efficiency"] = {
+        "num_samples": len(samples),
+        "inference_wall_seconds": inference_seconds,
+        "inference_samples_per_second": (
+            len(samples) / inference_seconds if inference_seconds > 0 else None
+        ),
+        "inference_milliseconds_per_sample": (
+            1000 * inference_seconds / len(samples) if samples else None
+        ),
+        "wall_seconds_including_model_load_and_calibration": evaluation_seconds,
+        "samples_per_second": len(samples) / evaluation_seconds if evaluation_seconds > 0 else None,
+        "calibration_enabled": bool(calibration_split),
+        "device": str(device),
+        "peak_gpu_memory_bytes": (torch.cuda.max_memory_allocated(device)
+                                  if device.type == "cuda" else None),
+    }
     destination = output_dir or checkpoint_dir
     destination.mkdir(parents=True, exist_ok=True)
     out_path = destination / f"eval_{dataset}_{split}.json"
     out_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    if prediction_rows is not None:
+        calibrated = metrics.get("calibrated", {})
+        if calibrated.get("status") == "ok":
+            weights = calibrated["head_weights"]
+            threshold = float(calibrated["threshold"])
+            for row in prediction_rows:
+                score = sum(float(weights[name]) * float(row[f"{name}_margin"])
+                            for name in ("fact", "g", "proximal"))
+                row["calibrated_score"] = score
+                row["calibrated_prediction"] = int(score >= threshold)
+        prediction_path = destination / f"predictions_{dataset}_{split}.jsonl"
+        with prediction_path.open("w", encoding="utf-8") as handle:
+            for row in prediction_rows:
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
     return metrics
 
 
@@ -365,6 +452,7 @@ def evaluate_model(
     loader: DataLoader,
     proxy_builder: ProxyBuilder,
     device: torch.device,
+    prediction_rows: Optional[List[Dict[str, object]]] = None,
 ) -> Dict[str, object]:
     model.eval()
     y_true: List[int] = []
@@ -394,6 +482,25 @@ def evaluate_model(
         pred_prox.extend(prox_logits.argmax(dim=-1).detach().cpu().tolist())
         losses.append(float(out["loss"].detach().cpu()))
         bridge_losses.append(float(out["bridge_loss"].detach().cpu()))
+        if prediction_rows is not None:
+            fact_pred = out["fact_logits"].argmax(dim=-1).detach().cpu().tolist()
+            g_pred = out["g_logits"].argmax(dim=-1).detach().cpu().tolist()
+            prox_pred = prox_logits.argmax(dim=-1).detach().cpu().tolist()
+            fact_margin = _refutes_margin(out["fact_logits"])
+            g_margin = _refutes_margin(out["g_logits"])
+            prox_margin = _refutes_margin(prox_logits)
+            labels = batch["labels"].detach().cpu().tolist()
+            for i, sample_id in enumerate(batch.get("sample_ids", [])):
+                prediction_rows.append({
+                    "sample_id": sample_id,
+                    "label": int(labels[i]),
+                    "fact_prediction": int(fact_pred[i]),
+                    "g_prediction": int(g_pred[i]),
+                    "proximal_prediction": int(prox_pred[i]),
+                    "fact_margin": float(fact_margin[i]),
+                    "g_margin": float(g_margin[i]),
+                    "proximal_margin": float(prox_margin[i]),
+                })
     return {
         "labels": ID_TO_LABEL,
         "loss": float(np.mean(losses)) if losses else 0.0,
@@ -466,6 +573,7 @@ def _bias_aware_training_loss(
     batch: Dict[str, object],
     loss_weights: LossWeights,
     label_weights: Optional[torch.Tensor],
+    group_dro_heads: set[str],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     labels = batch["labels"]
     w_ids = batch["w_ids"]
@@ -492,7 +600,14 @@ def _bias_aware_training_loss(
         + loss_weights.proxy * proxy_loss
         + loss_weights.bridge * bridge_loss
     )
-    per_sample_supervised = 0.5 * (fact_ce + g_ce) + prox_ce
+    dro_components = []
+    if "fact" in group_dro_heads:
+        dro_components.append(fact_ce)
+    if "g" in group_dro_heads:
+        dro_components.append(g_ce)
+    if "proximal" in group_dro_heads:
+        dro_components.append(prox_ce)
+    per_sample_supervised = torch.stack(dro_components).mean(dim=0)
     return total, per_sample_supervised
 
 

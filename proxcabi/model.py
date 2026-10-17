@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-from transformers import AutoModel
+from huggingface_hub import scan_cache_dir
+from transformers import AutoConfig, AutoModel
 
 
 def js_divergence(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -158,7 +160,30 @@ class ProxCABIModel(nn.Module):
 
 
 def _load_auto_model(backbone_name: str):
+    cached = _cached_safetensors_dir(backbone_name)
+    if cached is not None:
+        config = AutoConfig.from_pretrained(backbone_name, local_files_only=True)
+        return AutoModel.from_pretrained(
+            cached, config=config, use_safetensors=True, local_files_only=True
+        ).float()
     try:
         return AutoModel.from_pretrained(backbone_name, use_safetensors=True).float()
     except (OSError, ValueError):
         return AutoModel.from_pretrained(backbone_name).float()
+
+
+def _cached_safetensors_dir(backbone_name: str) -> Optional[Path]:
+    """Return any complete cached safetensors revision without a network lookup."""
+    try:
+        cache = scan_cache_dir()
+    except (OSError, ValueError):
+        return None
+    candidates: list[Path] = []
+    for repo in cache.repos:
+        if repo.repo_type != "model" or repo.repo_id != backbone_name:
+            continue
+        for revision in repo.revisions:
+            for cached_file in revision.files:
+                if cached_file.file_name in {"model.safetensors", "model.safetensors.index.json"}:
+                    candidates.append(Path(cached_file.file_path).parent)
+    return sorted(candidates)[-1] if candidates else None

@@ -116,6 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bias-reweighting", action="store_true")
     p.add_argument("--bias-reweight-factor", type=float, default=1.5)
     p.add_argument("--group-dro-weight", type=float, default=0.0)
+    p.add_argument("--group-dro-heads", default="fact,g,proximal",
+                   help="Comma-separated supervised heads used by GroupDRO")
     p.add_argument(
         "--bias-features",
         default="claim_negation,claim_label_lmi,claim_evidence_lexical_overlap",
@@ -142,6 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--calibration-grid-steps", type=int, default=5)
     p.add_argument("--calibration-quantiles", type=int, default=199)
     p.add_argument("--fever-symmetric-group-decode", action="store_true")
+    p.add_argument("--save-predictions", action="store_true",
+                   help="Save per-example head predictions and margins as JSONL")
 
     p = sub.add_parser("bias-report", help="Report delta_bias across claim-side bias groups")
     p.add_argument("--checkpoint-dir", type=Path, required=True)
@@ -261,6 +265,7 @@ def main() -> None:
             args.calibration_quantiles,
             args.fever_symmetric_group_decode,
             args.output_dir,
+            args.save_predictions,
         )
         print(json.dumps(result, indent=2))
     elif args.command == "bias-report":
