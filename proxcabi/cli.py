@@ -26,6 +26,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--splits", nargs="+", default=["train", "dev", "test", "symmetric", "test_real", "test_synthetic"])
     p.add_argument("--max-samples", type=int)
 
+    p = sub.add_parser("v2-diagnose", help="Report frozen structured-proxy health")
+    p.add_argument("--config", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("v2-report", help="Build V2 result tables from completed run manifests")
+    p.add_argument("--runs-dir", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("v2-apply-verifications", help="Merge trusted human/gold pair annotations")
+    p.add_argument("--candidate-pool", type=Path, required=True)
+    p.add_argument("--annotations", type=Path, required=True)
+    p.add_argument("--output-pool", type=Path, required=True)
+
     p = sub.add_parser("fit-proxies", help="Fit and save dataset-specific Z/W proxy builder")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
     p.add_argument("--dataset", required=True)
@@ -34,6 +47,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-samples", type=int)
     p.add_argument("--z-buckets", type=int, default=256)
     p.add_argument("--w-buckets", type=int, default=256)
+
+    p = sub.add_parser("v2-prepare", help="Freeze V2 dev splits and audit/convert counterfactual pools")
+    p.add_argument("--config", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("v2-fit-proxies", help="Fit structured V2 proxies on base train only")
+    p.add_argument("--config", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("v2-train", help="Train a semantic-sensitive V2 M1-M4 model")
+    p.add_argument("--config", type=Path, required=True)
+    p.add_argument("--variant", choices=["M1", "M2", "M3", "M4"], required=True)
+    p.add_argument("--seed", type=int, default=13)
+    p.add_argument("--output-dir", type=Path, required=True)
+
+    p = sub.add_parser("v2-evaluate", help="Evaluate a V2 checkpoint with a fixed prediction head")
+    p.add_argument("--checkpoint", type=Path, required=True)
+    p.add_argument("--config", type=Path, required=True)
+    p.add_argument("--split", required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--head", choices=["standardized", "fact", "g"], default="standardized")
+    p.add_argument("--max-samples", type=int)
 
     p = sub.add_parser("build-fever-counterfactuals", help="Build FEVER counterfactual augmentation split")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -185,6 +220,48 @@ def main() -> None:
             args.z_buckets,
             args.w_buckets,
         )
+    elif args.command == "v2-prepare":
+        from .v2.prepare_pairs import prepare_from_config
+
+        result = prepare_from_config(args.config, args.output_dir)
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-fit-proxies":
+        from .v2.prepare_pairs import fit_proxies_from_config
+
+        result = fit_proxies_from_config(args.config, args.output_dir)
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-train":
+        from .v2.train import train_v2
+
+        result = train_v2(args.config, args.variant, args.seed, args.output_dir)
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-evaluate":
+        from .v2.evaluate import evaluate_checkpoint_v2
+
+        result = evaluate_checkpoint_v2(
+            args.checkpoint,
+            args.config,
+            args.split,
+            args.output_dir,
+            args.head,
+            args.max_samples,
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-diagnose":
+        from .v2.diagnostics import run_proxy_diagnostics
+
+        result = run_proxy_diagnostics(args.config, args.output_dir)
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-report":
+        from .v2.reporting import build_paper_tables
+
+        result = build_paper_tables(args.runs_dir, args.output_dir)
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-apply-verifications":
+        from .v2.verify_pairs import apply_verifications
+
+        result = apply_verifications(args.candidate_pool, args.annotations, args.output_pool)
+        print(json.dumps(result, indent=2))
     elif args.command == "build-fever-counterfactuals":
         from .counterfactuals import build_fever_counterfactuals
 

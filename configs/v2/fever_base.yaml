@@ -1,0 +1,111 @@
+schema_version: "v2.0"
+project: "ProxCABI-FV-SSSD"
+seed: 13
+
+paths:
+  data_dir: "data"
+  output_root: "outputs/v2"
+  proxy_artifact: "outputs/v2/proxy_artifacts/fever"
+  pair_pool_train: "outputs/v2/frozen_data/fever_cf_train.jsonl"
+  pair_pool_val: "outputs/v2/frozen_data/fever_cf_dev_select.jsonl"
+
+data:
+  dataset: "FEVER"
+  train_split: "train"
+  select_split: "dev_select"
+  calib_split: "dev_calib"
+  report_split: "dev_report"
+  ood_dataset: "FEVER"
+  ood_split: "symmetric"
+  label_space: ["supports", "refutes", "not enough info"]
+  pair_required_verified: true
+  allow_unverified_semantic: false
+  primary_group: "negation_x_overlap"
+  min_group_support: 50
+  inv_sem_ratio: 0.5
+  max_length: 256
+
+prepare:
+  source_dev_split: "dev"
+  legacy_cf_train_split: "cf_train_hard_nli"
+  legacy_cf_dev_split: "cf_dev_hard_nli"
+
+proxy:
+  mode: "structured"
+  fit_on: "base_train_only"
+  z_features:
+    - "claim_negation"
+    - "claim_length"
+    - "claim_entity_pattern"
+    - "claim_template"
+    - "claim_lexical_shortcut"
+  w_features:
+    - "evidence_length_bucket"
+    - "evidence_sentence_count_bucket"
+  w_use_unknown_category: true
+  w_max_classes: 16
+  smoothing_alpha: 1.0
+  freeze_pi0: true
+  lmi_top_k: 64
+  lmi_min_count: 5
+  q_hidden_dim: 768
+  proxy_embedding_dim: 64
+
+model:
+  backbone: "roberta-base"
+  dropout: 0.1
+  primary_head: "standardized"
+  train_fact_head: true
+  train_g_head: true
+  train_q_head: true
+  train_h_head: true
+  enable_bridge_alignment: true
+
+loss:
+  lambda_std: 1.0
+  lambda_fact: 0.25
+  lambda_g: 0.25
+  lambda_h: 0.5
+  lambda_proxy: 0.1
+  lambda_bridge: 0.05
+  lambda_invariance: 0.1
+  lambda_semantic: 0.1
+  semantic_margin: 0.5
+  js_eps: 1.0e-8
+
+sampling:
+  mode: "dual_budget"
+  pair_budget: 5000
+  warmup_fraction: 0.2
+  inv_sem_ratio: 0.5
+  group_alpha: 0.5
+  group_beta: 0.5
+  softmax_gamma: 1.0
+  explore_rho: 0.2
+  capacity_eta: 0.5
+  min_group_pairs: 50
+  max_group_score: 5.0
+  select_without_replacement: true
+
+train:
+  epochs_equivalent: 3
+  total_optimizer_steps: 15000
+  batch_size: 16
+  grad_accumulation_steps: 2
+  eval_batch_size: 32
+  lr: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.06
+  amp: true
+  amp_dtype: "float16"
+  gradient_clip_norm: 1.0
+  checkpoint_interval_steps: 1000
+  selection_metric: "macro_f1_standardized"
+  early_stop_on_ood: false
+
+experiment:
+  variants: ["B0", "B1", "B2", "M0", "M1", "M2", "M3", "M4", "M5"]
+  seeds: [13, 21, 42]
+  pair_bootstrap_repeats: 2000
+  report_per_sample_predictions: true
+  forbid_test_time_selection: true
