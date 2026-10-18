@@ -207,6 +207,7 @@ def evaluate_checkpoint_v2(
     output_dir: Path,
     head: str = "standardized",
     max_samples: Optional[int] = None,
+    dataset: Optional[str] = None,
 ) -> Dict[str, object]:
     """Restore a V2 checkpoint and evaluate without fitting any test object."""
 
@@ -217,14 +218,11 @@ def evaluate_checkpoint_v2(
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     data_cfg = config["data"]
     train_cfg = config["train"]
-    paths = config["paths"]
     proxy = StructuredProxyBuilder.from_dict(payload["proxy_builder"])
-    samples = _evaluation_samples(config, split, max_samples)
-    binary = split == str(data_cfg.get("ood_split", "symmetric"))
-    tokenizer_dir = checkpoint_path.parent / "tokenizer"
-    tokenizer = AutoTokenizer.from_pretrained(
-        tokenizer_dir if tokenizer_dir.exists() else payload["backbone"], use_fast=True
-    )
+    eval_dataset = dataset or str(data_cfg["dataset"])
+    samples = _evaluation_samples(config, split, max_samples, dataset=eval_dataset)
+    binary = eval_dataset == "FEVER" and split == str(data_cfg.get("ood_split", "symmetric"))
+    tokenizer, model, device = _restore_model(checkpoint_path, payload, config, proxy)
     loader = DataLoader(
         PairedDataset(make_pair_samples(samples, []), proxy),
         batch_size=int(train_cfg["eval_batch_size"]),
@@ -232,24 +230,6 @@ def evaluate_checkpoint_v2(
         collate_fn=PairedBatchCollator(tokenizer, int(data_cfg["max_length"])),
         num_workers=int(train_cfg.get("num_workers", 0)),
     )
-    device_name = str(train_cfg.get("device", "auto"))
-    device = torch.device(
-        "cuda" if device_name == "auto" and torch.cuda.is_available()
-        else "cpu" if device_name == "auto"
-        else device_name
-    )
-    model_config = payload["model_config"]
-    model = ProxCABIV2(
-        backbone_name=payload["backbone"],
-        num_labels=int(model_config["num_labels"]),
-        z_dim=int(model_config["z_dim"]),
-        num_w_classes=int(model_config["num_w_classes"]),
-        pi0=torch.tensor(proxy.pi0),
-        proxy_dim=int(model_config["proxy_dim"]),
-        dropout=float(config["model"].get("dropout", 0.1)),
-    )
-    model.load_state_dict(payload["model_state"])
-    model.to(device)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics = evaluate_classification(
         model,
@@ -261,6 +241,7 @@ def evaluate_checkpoint_v2(
     )
     metrics.update({
         "split": split,
+        "dataset": eval_dataset,
         "checkpoint": str(checkpoint_path),
         "checkpoint_step": int(payload["step"]),
         "selection_head": "standardized",
@@ -273,18 +254,115 @@ def evaluate_checkpoint_v2(
     return metrics
 
 
+def evaluate_pair_checkpoint_v2(
+    checkpoint: Path,
+    config_path: Path,
+    dataset: str,
+    split: str,
+    pair_pool: Path,
+    output_dir: Path,
+    head: str = "standardized",
+    max_samples: Optional[int] = None,
+    max_pair_samples: Optional[int] = None,
+) -> Dict[str, object]:
+    """Restore a checkpoint and evaluate verified invariant/semantic pairs."""
+
+    from .train import _load_samples_file
+
+    checkpoint_path = checkpoint / "best_model.pt" if checkpoint.is_dir() else checkpoint
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if payload.get("schema_version") != "v2.0":
+        raise ValueError("not a V2 checkpoint")
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    data_cfg = config["data"]
+    train_cfg = config["train"]
+    proxy = StructuredProxyBuilder.from_dict(payload["proxy_builder"])
+    base_samples = load_samples(
+        Path(config["paths"]["data_dir"]), dataset, split, max_samples=max_samples
+    )
+    pool_samples = _load_samples_file(pair_pool, dataset, split, max_pair_samples)
+    pairs = make_pair_samples(
+        base_samples, pool_samples, require_verified=True, expand_candidates=True
+    )
+    active_pairs = [pair for pair in pairs if pair.invariant is not None or pair.semantic is not None]
+    if not active_pairs:
+        raise ValueError("no verified pair rows align with the requested base dataset split")
+    tokenizer, model, device = _restore_model(checkpoint_path, payload, config, proxy)
+    loader = DataLoader(
+        PairedDataset(active_pairs, proxy),
+        batch_size=int(train_cfg["eval_batch_size"]),
+        shuffle=False,
+        collate_fn=PairedBatchCollator(tokenizer, int(data_cfg["max_length"])),
+        num_workers=int(train_cfg.get("num_workers", 0)),
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    predictions_path = output_dir / f"pair_predictions_{dataset.lower()}_{split}.jsonl"
+    metrics = evaluate_pairs(model, loader, device, head=head, predictions_path=predictions_path)
+    metrics.update({
+        "dataset": dataset,
+        "split": split,
+        "checkpoint": str(checkpoint_path),
+        "checkpoint_step": int(payload["step"]),
+        "pair_pool": str(pair_pool),
+        "verified_only": True,
+        "test_time_fitting": False,
+    })
+    output_path = output_dir / f"eval_pairs_{dataset.lower()}_{split}.json"
+    output_path.write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return metrics
+
+
 def _evaluation_samples(
-    config: Mapping[str, object], split: str, max_samples: Optional[int]
+    config: Mapping[str, object],
+    split: str,
+    max_samples: Optional[int],
+    dataset: Optional[str] = None,
 ) -> List[FactSample]:
     from .train import _load_samples_file
 
     data = config["data"]
     paths = config["paths"]
+    eval_dataset = dataset or str(data["dataset"])
     frozen_names = {str(data.get(key)) for key in ("select_split", "calib_split", "report_split")}
-    if split in frozen_names:
+    if eval_dataset == str(data["dataset"]) and split in frozen_names:
         path = Path(paths["pair_pool_val"]).parent / f"{split}.jsonl"
-        return _load_samples_file(path, str(data["dataset"]), split, max_samples)
-    return load_samples(Path(paths["data_dir"]), str(data["dataset"]), split, max_samples=max_samples)
+        return _load_samples_file(path, eval_dataset, split, max_samples)
+    return load_samples(Path(paths["data_dir"]), eval_dataset, split, max_samples=max_samples)
+
+
+def _restore_model(
+    checkpoint_path: Path,
+    payload: Mapping[str, object],
+    config: Mapping[str, object],
+    proxy: StructuredProxyBuilder,
+) -> tuple[object, ProxCABIV2, torch.device]:
+    tokenizer_dir = checkpoint_path.parent / "tokenizer"
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_dir if tokenizer_dir.exists() else str(payload["backbone"]), use_fast=True
+    )
+    train_cfg = config["train"]
+    device_name = str(train_cfg.get("device", "auto"))
+    device = torch.device(
+        "cuda" if device_name == "auto" and torch.cuda.is_available()
+        else "cpu" if device_name == "auto"
+        else device_name
+    )
+    model_config = payload["model_config"]
+    model = ProxCABIV2(
+        backbone_name=str(payload["backbone"]),
+        num_labels=int(model_config["num_labels"]),
+        z_dim=int(model_config["z_dim"]),
+        num_w_classes=int(model_config["num_w_classes"]),
+        pi0=torch.tensor(proxy.pi0),
+        proxy_dim=int(model_config["proxy_dim"]),
+        dropout=float(config["model"].get("dropout", 0.1)),
+    )
+    model.load_state_dict(payload["model_state"])
+    model.to(device)
+    return tokenizer, model, device
 
 
 def _to_device(value: object, device: torch.device) -> object:

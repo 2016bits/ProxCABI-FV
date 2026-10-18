@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--annotations", type=Path, required=True)
     p.add_argument("--output-pool", type=Path, required=True)
 
+    p = sub.add_parser("v2-build-vitaminc-pairs", help="Build dataset-gold pairs from VitaminC case_id groups")
+    p.add_argument("--input", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--split-origin", default="train")
+    p.add_argument("--max-cases", type=int)
+
     p = sub.add_parser("fit-proxies", help="Fit and save dataset-specific Z/W proxy builder")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
     p.add_argument("--dataset", required=True)
@@ -65,10 +71,22 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("v2-evaluate", help="Evaluate a V2 checkpoint with a fixed prediction head")
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--config", type=Path, required=True)
+    p.add_argument("--dataset", help="Override config.data.dataset for cross-dataset evaluation")
     p.add_argument("--split", required=True)
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--head", choices=["standardized", "fact", "g"], default="standardized")
     p.add_argument("--max-samples", type=int)
+
+    p = sub.add_parser("v2-evaluate-pairs", help="Evaluate a V2 checkpoint on a verified pair pool")
+    p.add_argument("--checkpoint", type=Path, required=True)
+    p.add_argument("--config", type=Path, required=True)
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--split", required=True)
+    p.add_argument("--pair-pool", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--head", choices=["standardized", "fact", "g"], default="standardized")
+    p.add_argument("--max-samples", type=int)
+    p.add_argument("--max-pair-samples", type=int)
 
     p = sub.add_parser("build-fever-counterfactuals", help="Build FEVER counterfactual augmentation split")
     p.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -245,6 +263,22 @@ def main() -> None:
             args.output_dir,
             args.head,
             args.max_samples,
+            args.dataset,
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-evaluate-pairs":
+        from .v2.evaluate import evaluate_pair_checkpoint_v2
+
+        result = evaluate_pair_checkpoint_v2(
+            args.checkpoint,
+            args.config,
+            args.dataset,
+            args.split,
+            args.pair_pool,
+            args.output_dir,
+            args.head,
+            args.max_samples,
+            args.max_pair_samples,
         )
         print(json.dumps(result, indent=2))
     elif args.command == "v2-diagnose":
@@ -261,6 +295,13 @@ def main() -> None:
         from .v2.verify_pairs import apply_verifications
 
         result = apply_verifications(args.candidate_pool, args.annotations, args.output_pool)
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-build-vitaminc-pairs":
+        from .v2.prepare_pairs import build_vitaminc_official_pairs
+
+        result = build_vitaminc_official_pairs(
+            args.input, args.output, args.split_origin, args.max_cases
+        )
         print(json.dumps(result, indent=2))
     elif args.command == "build-fever-counterfactuals":
         from .counterfactuals import build_fever_counterfactuals

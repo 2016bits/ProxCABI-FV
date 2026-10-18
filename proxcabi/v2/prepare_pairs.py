@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import yaml
 
-from proxcabi.data import FactSample, ID_TO_LABEL, load_samples
+from proxcabi.data import FactSample, ID_TO_LABEL, load_samples, normalize_label
 
 from .schemas import CounterfactualRecord, validate_record
 
@@ -234,9 +234,21 @@ def fit_proxies_from_config(config_path: Path, output_dir: Path) -> Dict[str, ob
     if proxy_cfg.get("fit_on", "base_train_only") != "base_train_only":
         raise ValueError("V2 proxies must use proxy.fit_on=base_train_only")
     data_dir = Path(paths_cfg.get("data_dir", "data"))
-    dataset = str(data_cfg.get("dataset", "FEVER"))
-    split = str(data_cfg.get("train_split", "train"))
-    samples = load_samples(data_dir, dataset, split)
+    sources = data_cfg.get("train_sources")
+    if sources:
+        samples = []
+        for source in sources:
+            source = dict(source)
+            samples.extend(load_samples(
+                data_dir,
+                str(source["dataset"]),
+                str(source.get("split", "train")),
+                max_samples=int(source["max_samples"]) if source.get("max_samples") is not None else None,
+            ))
+    else:
+        dataset = str(data_cfg.get("dataset", "FEVER"))
+        split = str(data_cfg.get("train_split", "train"))
+        samples = load_samples(data_dir, dataset, split)
     builder = StructuredProxyBuilder(
         lmi_top_k=int(proxy_cfg.get("lmi_top_k", 64)),
         lmi_min_count=int(proxy_cfg.get("lmi_min_count", 5)),
@@ -253,6 +265,124 @@ def fit_proxies_from_config(config_path: Path, output_dir: Path) -> Dict[str, ob
     }
     _write_json(output_dir / "fit_summary.json", result)
     return result
+
+
+def build_vitaminc_official_pairs(
+    input_path: Path,
+    output_path: Path,
+    split_origin: str = "train",
+    max_cases: int | None = None,
+) -> Dict[str, object]:
+    """Recover dataset-gold VitaminC contrastive edges by official ``case_id``.
+
+    Only rows differing in exactly claim or evidence and having different gold
+    labels become semantic pairs. No invariant relation is inferred.
+    """
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    counts: Counter[str] = Counter()
+    label_transitions: Counter[str] = Counter()
+    seen_cases: set[str] = set()
+    current_case = ""
+    current_rows: List[Mapping[str, object]] = []
+    cases_written = 0
+
+    def emit_case(rows: Sequence[Mapping[str, object]], handle: object) -> int:
+        if not rows:
+            return 0
+        emitted = 0
+        ordered = sorted(rows, key=lambda row: str(row.get("id", "")))
+        for left_index, source in enumerate(ordered):
+            for target in ordered[left_index + 1:]:
+                same_claim = _normalize_text(str(source.get("claim", ""))) == _normalize_text(str(target.get("claim", "")))
+                same_evidence = _normalize_text(str(source.get("evidence", ""))) == _normalize_text(str(target.get("evidence", "")))
+                if same_claim == same_evidence:
+                    continue
+                source_label = normalize_label(source.get("label", ""))
+                target_label = normalize_label(target.get("label", ""))
+                if source_label == target_label:
+                    counts["same_label_edges_skipped"] += 1
+                    continue
+                source_meta = dict(source.get("metadata") or {})
+                case_id = str(source_meta["case_id"])
+                changed_field = "evidence" if same_claim else "claim"
+                pair_id = f"VitaminC:{case_id}:{source['id']}->{target['id']}"
+                source_digest = hashlib.sha256(json.dumps(
+                    [source["id"], source["claim"], source["evidence"], source_label],
+                    ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+                metadata = {
+                    "dataset": "VitaminC",
+                    "parent_id": str(source["id"]),
+                    "pair_id": pair_id,
+                    "case_id": case_id,
+                    "transform_type": f"semantic_{changed_field}",
+                    "source_label": source_label,
+                    "target_label": target_label,
+                    "changed_field": changed_field,
+                    "edit_category": f"official_revision_{changed_field}",
+                    "verified": True,
+                    "verification_method": "dataset_gold",
+                    "split_origin": split_origin,
+                    "generator_version": "vitaminc_official_case_v1",
+                    "source_hash": source_digest,
+                    "evidence_source_id": str(source_meta.get("page", "")),
+                    "wiki_revision_id": str(source_meta.get("wiki_revision_id", "")),
+                    "revision_type": str(source_meta.get("revision_type", "unknown")),
+                }
+                output = {
+                    "id": f"pair_{target['id']}_from_{source['id']}",
+                    "claim": target["claim"],
+                    "evidence": target["evidence"],
+                    "label": target_label,
+                    "num_hops": int(target.get("num_hops", 1)),
+                    "metadata": metadata,
+                }
+                handle.write(json.dumps(output, ensure_ascii=False, sort_keys=True) + "\n")
+                counts[f"semantic_{changed_field}"] += 1
+                label_transitions[f"{source_label}->{target_label}"] += 1
+                emitted += 1
+        return emitted
+
+    with input_path.open("r", encoding="utf-8") as source_handle, output_path.open("w", encoding="utf-8") as output_handle:
+        for line in source_handle:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            case_id = str((row.get("metadata") or {}).get("case_id", ""))
+            if not case_id:
+                raise ValueError(f"VitaminC row {row.get('id')!r} has no case_id")
+            if current_case and case_id != current_case:
+                emit_case(current_rows, output_handle)
+                seen_cases.add(current_case)
+                cases_written += 1
+                if max_cases is not None and cases_written >= max_cases:
+                    current_rows = []
+                    break
+                if case_id in seen_cases:
+                    raise ValueError(f"VitaminC case_id is not contiguous: {case_id}")
+                current_rows = []
+            current_case = case_id
+            current_rows.append(row)
+        else:
+            if current_rows and (max_cases is None or cases_written < max_cases):
+                emit_case(current_rows, output_handle)
+                cases_written += 1
+    report = {
+        "schema_version": "v2.0",
+        "source": str(input_path),
+        "output": str(output_path),
+        "split_origin": split_origin,
+        "num_cases": cases_written,
+        "num_pairs": counts["semantic_claim"] + counts["semantic_evidence"],
+        "transform_types": {key: value for key, value in sorted(counts.items()) if key.startswith("semantic_")},
+        "same_label_edges_skipped": counts["same_label_edges_skipped"],
+        "label_transitions": dict(sorted(label_transitions.items())),
+        "output_sha256": _file_sha256(output_path),
+        "verification_method": "dataset_gold",
+    }
+    _write_json(output_path.parent / f"{output_path.stem}_audit.json", report)
+    return report
 
 
 def assert_disjoint_parents(splits: Mapping[str, Sequence[FactSample]]) -> None:

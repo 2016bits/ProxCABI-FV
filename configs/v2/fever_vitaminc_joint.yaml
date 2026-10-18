@@ -1,0 +1,86 @@
+schema_version: "v2.0"
+project: "ProxCABI-FV-SSSD-FEVER-VitaminC"
+seed: 13
+
+paths:
+  data_dir: "data"
+  output_root: "outputs/v2/joint"
+  proxy_artifact: "outputs/v2/proxy_artifacts/fever_vitaminc_joint"
+  pair_pool_train: "outputs/v2/frozen_data/vitaminc_official_train_pairs.jsonl"
+  pair_pool_val: "outputs/v2/frozen_data/vitaminc_official_dev_pairs.jsonl"
+  dev_select: "outputs/v2/frozen_data/dev_select.jsonl"
+
+data:
+  dataset: "FEVER"
+  train_split: "train"
+  train_sources:
+    - dataset: "FEVER"
+      split: "train"
+    - dataset: "VitaminC"
+      split: "train"
+  select_split: "dev_select"
+  calib_split: "dev_calib"
+  report_split: "dev_report"
+  ood_split: "symmetric"
+  pair_required_verified: true
+  allow_unverified_semantic: false
+  expand_pair_candidates: true
+  max_length: 256
+
+proxy:
+  mode: "structured"
+  fit_on: "base_train_only"
+  freeze_pi0: true
+  smoothing_alpha: 1.0
+  lmi_top_k: 64
+  lmi_min_count: 5
+  proxy_embedding_dim: 64
+
+model:
+  backbone: "roberta-base"
+  dropout: 0.1
+  primary_head: "standardized"
+  train_fact_head: true
+  train_g_head: true
+  train_q_head: true
+  train_h_head: true
+  enable_bridge_alignment: true
+
+loss:
+  lambda_std: 1.0
+  lambda_fact: 0.25
+  lambda_g: 0.25
+  lambda_h: 0.5
+  lambda_proxy: 0.1
+  lambda_bridge: 0.05
+  lambda_invariance: 0.0
+  lambda_semantic: 0.1
+  semantic_margin: 0.5
+
+sampling:
+  mode: "uniform"
+  pair_budget: 5000
+  inv_sem_ratio: 0.0
+
+train:
+  # Three passes over ~480.5k joint rows at effective batch size 32.
+  total_optimizer_steps: 45048
+  batch_size: 16
+  grad_accumulation_steps: 2
+  eval_batch_size: 32
+  lr: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.06
+  amp: true
+  gradient_clip_norm: 1.0
+  checkpoint_interval_steps: 1000
+  num_workers: 2
+  device: "auto"
+  selection_metric: "macro_f1_standardized"
+  early_stop_on_ood: false
+
+experiment:
+  variants: ["M1", "M3"]
+  seeds: [13, 21, 42]
+  report_per_sample_predictions: true
+  forbid_test_time_selection: true

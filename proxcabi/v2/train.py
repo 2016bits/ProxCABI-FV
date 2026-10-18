@@ -6,6 +6,7 @@ import platform
 import random
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterator, List, Mapping, Optional
 
@@ -18,6 +19,7 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 from proxcabi.data import FactSample, LABELS, iter_records, load_samples, normalize_label
 
 from .evaluate import evaluate_classification
+from .budget import BudgetConfig, select_pairs
 from .losses import V2LossWeights, compute_v2_losses
 from .model import ProxCABIV2
 from .pair_dataset import PairedBatchCollator, PairedDataset, make_pair_samples
@@ -56,12 +58,7 @@ def train_v2(
 
     proxy_dir = Path(paths["proxy_artifact"])
     proxy = StructuredProxyBuilder.load(proxy_dir)
-    base_train = load_samples(
-        Path(paths["data_dir"]),
-        str(data_cfg["dataset"]),
-        str(data_cfg["train_split"]),
-        max_samples=_optional_int(data_cfg.get("max_train_samples")),
-    )
+    base_train = _load_joint_train(Path(paths["data_dir"]), data_cfg)
     if proxy.base_train_source_sha256 == "":
         raise ValueError("proxy artifact has no base-train provenance hash")
     pool = _load_samples_file(
@@ -70,7 +67,13 @@ def train_v2(
         "train",
         _optional_int(data_cfg.get("max_pair_samples")),
     )
-    pairs = make_pair_samples(base_train, pool, require_verified=True)
+    pool = _select_pair_pool(pool, config.get("sampling", {}), seed)
+    pairs = make_pair_samples(
+        base_train,
+        pool,
+        require_verified=True,
+        expand_candidates=bool(data_cfg.get("expand_pair_candidates", False)),
+    )
     pair_counts = {
         "base": len(pairs),
         "invariant": sum(pair.invariant is not None for pair in pairs),
@@ -155,6 +158,9 @@ def train_v2(
     _write_json(output_dir / "selected_pair_ids.json", selected_ids)
     _write_json(output_dir / "dataset_manifest.json", {
         "base_train_count": len(base_train),
+        "base_train_counts_by_dataset": dict(sorted(Counter(
+            sample.dataset for sample in base_train
+        ).items())),
         "dev_select_count": len(select_samples),
         "pair_counts": pair_counts,
         "base_train_proxy_sha256": proxy.base_train_source_sha256,
@@ -345,7 +351,7 @@ def _load_samples_file(
             evidence = " ".join(str(value) for value in evidence)
         samples.append(FactSample(
             sample_id=str(row.get("id", "")),
-            dataset=dataset,
+            dataset=str(metadata.get("dataset", dataset)),
             split=split,
             claim=str(row.get("claim", "")),
             evidence=str(evidence),
@@ -354,6 +360,79 @@ def _load_samples_file(
             metadata=dict(metadata),
         ))
     return samples
+
+
+def _load_joint_train(data_dir: Path, data_cfg: Mapping[str, object]) -> List[FactSample]:
+    sources = data_cfg.get("train_sources")
+    if not sources:
+        return load_samples(
+            data_dir,
+            str(data_cfg["dataset"]),
+            str(data_cfg["train_split"]),
+            max_samples=_optional_int(data_cfg.get("max_train_samples")),
+        )
+    samples: List[FactSample] = []
+    seen_ids = set()
+    for raw_source in sources:
+        source = dict(raw_source)
+        rows = load_samples(
+            data_dir,
+            str(source["dataset"]),
+            str(source.get("split", "train")),
+            max_samples=_optional_int(source.get("max_samples")),
+        )
+        for sample in rows:
+            if sample.sample_id in seen_ids:
+                raise ValueError(f"duplicate sample_id across joint training sources: {sample.sample_id}")
+            seen_ids.add(sample.sample_id)
+        samples.extend(rows)
+    return samples
+
+
+def _select_pair_pool(
+    pool: List[FactSample], sampling_cfg: object, seed: int
+) -> List[FactSample]:
+    """Apply a deterministic, without-replacement pair budget before alignment."""
+
+    sampling = dict(sampling_cfg) if isinstance(sampling_cfg, Mapping) else {}
+    budget_value = sampling.get("pair_budget")
+    mode = str(sampling.get("mode", "all_verified"))
+    if budget_value is None or mode == "all_verified":
+        return pool
+    if mode not in {"uniform", "random"}:
+        raise ValueError(
+            f"training-time selector {mode!r} requires warm-up scores; "
+            "use uniform/random here or run the staged budget pipeline"
+        )
+    budget = int(budget_value)
+    rows = []
+    by_pair_id: Dict[str, FactSample] = {}
+    for sample in pool:
+        metadata = sample.metadata or {}
+        pair_id = str(metadata.get("pair_id", ""))
+        if pair_id in by_pair_id:
+            raise ValueError(f"duplicate pair_id in training pool: {pair_id}")
+        by_pair_id[pair_id] = sample
+        rows.append({
+            "pair_id": pair_id,
+            "verified": metadata.get("verified") is True,
+            "transform_type": str(metadata.get("transform_type", "")),
+            "group_id": str(metadata.get("edit_category", "ungrouped")),
+            "label_transition": (
+                f"{metadata.get('source_label', '')}->{metadata.get('target_label', '')}"
+            ),
+        })
+    selected_ids = select_pairs(
+        mode,
+        rows,
+        [],
+        BudgetConfig(
+            total_pairs=budget,
+            inv_sem_ratio=float(sampling.get("inv_sem_ratio", 0.5)),
+            seed=seed,
+        ),
+    )
+    return [by_pair_id[pair_id] for pair_id in selected_ids]
 
 
 def _save_checkpoint(

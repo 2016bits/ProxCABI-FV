@@ -1,0 +1,68 @@
+schema_version: "v2.0"
+project: "ProxCABI-FV-SSSD-FEVER-VitaminC-smoke"
+seed: 13
+paths:
+  data_dir: "data"
+  output_root: "outputs/v2/joint"
+  proxy_artifact: "outputs/v2/proxy_artifacts/fever_vitaminc_joint"
+  pair_pool_train: "outputs/v2/frozen_data/vitaminc_official_train_pairs.jsonl"
+  pair_pool_val: "outputs/v2/frozen_data/vitaminc_official_dev_pairs.jsonl"
+  dev_select: "outputs/v2/frozen_data/dev_select.jsonl"
+data:
+  dataset: "FEVER"
+  train_split: "train"
+  train_sources:
+    - dataset: "FEVER"
+      split: "train"
+      max_samples: 256
+    - dataset: "VitaminC"
+      split: "train"
+      max_samples: 256
+  select_split: "dev_select"
+  calib_split: "dev_calib"
+  report_split: "dev_report"
+  ood_split: "symmetric"
+  pair_required_verified: true
+  allow_unverified_semantic: false
+  expand_pair_candidates: true
+  max_pair_samples: 256
+  max_eval_samples: 96
+  max_length: 128
+proxy:
+  mode: "structured"
+  fit_on: "base_train_only"
+  freeze_pi0: true
+  proxy_embedding_dim: 32
+model:
+  backbone: "hf-internal-testing/tiny-random-roberta"
+  dropout: 0.1
+  primary_head: "standardized"
+loss:
+  lambda_std: 1.0
+  lambda_fact: 0.25
+  lambda_g: 0.25
+  lambda_h: 0.5
+  lambda_proxy: 0.1
+  lambda_bridge: 0.05
+  lambda_invariance: 0.0
+  lambda_semantic: 0.1
+  semantic_margin: 0.5
+sampling:
+  mode: "all_verified"
+  pair_budget: 256
+  inv_sem_ratio: 0.0
+train:
+  total_optimizer_steps: 10
+  batch_size: 8
+  grad_accumulation_steps: 1
+  eval_batch_size: 16
+  lr: 5.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.0
+  amp: false
+  gradient_clip_norm: 1.0
+  checkpoint_interval_steps: 5
+  num_workers: 0
+  device: "auto"
+  selection_metric: "macro_f1_standardized"
+  early_stop_on_ood: false

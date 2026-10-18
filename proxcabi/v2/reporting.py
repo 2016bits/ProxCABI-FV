@@ -22,7 +22,8 @@ def build_paper_tables(runs_dir: Path, output_dir: Path) -> Dict[str, object]:
         for eval_path in sorted(run_dir.glob("**/eval_*.json")):
             evaluation = json.loads(eval_path.read_text(encoding="utf-8"))
             split = str(evaluation.get("split", eval_path.stem.removeprefix("eval_")))
-            evaluations[split] = evaluation
+            dataset = str(evaluation.get("dataset", "unknown")).lower()
+            evaluations[f"{dataset}_{split}"] = evaluation
         row: Dict[str, object] = {
             "run_dir": str(run_dir),
             "variant": manifest["variant"],
@@ -33,10 +34,13 @@ def build_paper_tables(runs_dir: Path, output_dir: Path) -> Dict[str, object]:
             "best_dev_select_macro_f1": manifest["best_dev_select_macro_f1"],
             "training_wall_seconds": manifest["training_wall_seconds"],
         }
-        for split, evaluation in evaluations.items():
-            row[f"{split}_accuracy"] = evaluation.get("accuracy")
-            row[f"{split}_macro_f1"] = evaluation.get("macro_f1")
-            row[f"{split}_num_samples"] = evaluation.get("num_samples")
+        for evaluation_name, evaluation in evaluations.items():
+            for metric in (
+                "accuracy", "macro_f1", "num_samples", "ipr", "scr",
+                "changed_only_accuracy", "semantic_flip_rate", "num_semantic_pairs",
+            ):
+                if metric in evaluation:
+                    row[f"{evaluation_name}_{metric}"] = evaluation[metric]
         rows.append(row)
     columns = sorted({key for row in rows for key in row})
     output_dir.mkdir(parents=True, exist_ok=True)

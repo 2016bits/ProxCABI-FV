@@ -18,13 +18,14 @@ def make_pair_samples(
     counterfactual_samples: Sequence[FactSample],
     *,
     require_verified: bool = True,
+    expand_candidates: bool = False,
 ) -> List[PairSample]:
-    """Align at most one deterministic invariant/semantic view per base row.
+    """Align deterministic invariant/semantic views to their base rows.
 
     Candidate selection itself belongs to the budget module. This helper uses
-    lexical ``pair_id`` ordering and is intended for frozen pools or smoke
-    tests. Unverified rows are excluded by default and can never pass
-    ``PairSample`` validation as active training views.
+    lexical ``pair_id`` ordering; ``expand_candidates`` emits every selected
+    view as a separate training row. Unverified rows are excluded by default
+    and can never pass ``PairSample`` validation as active training views.
     """
 
     candidates: Dict[str, Dict[str, List[FactSample]]] = defaultdict(
@@ -51,16 +52,26 @@ def make_pair_samples(
         views = candidates.get(parent_id, {"invariant": [], "semantic": []})
         invariant = _first_view(views["invariant"])
         semantic = _first_view(views["semantic"])
-        pair = PairSample(
-            base=base,
-            invariant=invariant,
-            semantic=semantic,
-            group_id=str(base.metadata.get("group_id", "ungrouped")),
-            pair_id_inv=_pair_id(invariant),
-            pair_id_sem=_pair_id(semantic),
-        )
-        validate_pair(pair)
-        pairs.append(pair)
+        if expand_candidates and (views["invariant"] or views["semantic"]):
+            expanded = [
+                PairSample(base, view, None, str(base.metadata.get("group_id", "ungrouped")), _pair_id(view), None)
+                for view in sorted(views["invariant"], key=lambda item: _pair_id(item) or "")
+            ] + [
+                PairSample(base, None, view, str(base.metadata.get("group_id", "ungrouped")), None, _pair_id(view))
+                for view in sorted(views["semantic"], key=lambda item: _pair_id(item) or "")
+            ]
+        else:
+            expanded = [PairSample(
+                base=base,
+                invariant=invariant,
+                semantic=semantic,
+                group_id=str(base.metadata.get("group_id", "ungrouped")),
+                pair_id_inv=_pair_id(invariant),
+                pair_id_sem=_pair_id(semantic),
+            )]
+        for pair in expanded:
+            validate_pair(pair)
+            pairs.append(pair)
     return pairs
 
 
