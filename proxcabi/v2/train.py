@@ -12,6 +12,7 @@ from typing import Dict, Iterator, List, Mapping, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
@@ -59,10 +60,18 @@ def train_v2(
     proxy_dir = Path(paths["proxy_artifact"])
     proxy = StructuredProxyBuilder.load(proxy_dir)
     base_train = _load_joint_train(Path(paths["data_dir"]), data_cfg)
+    train_data_fingerprint = _samples_fingerprint(base_train)
     if proxy.base_train_source_sha256 == "":
         raise ValueError("proxy artifact has no base-train provenance hash")
-    pool = _load_samples_file(
-        Path(paths["pair_pool_train"]),
+    pair_pool_path = Path(paths["pair_pool_train"])
+    sampling_cfg = config.get("sampling", {})
+    zero_pair_budget = (
+        isinstance(sampling_cfg, Mapping)
+        and sampling_cfg.get("pair_budget") is not None
+        and int(sampling_cfg["pair_budget"]) == 0
+    )
+    pool = [] if zero_pair_budget else _load_samples_file(
+        pair_pool_path,
         str(data_cfg["dataset"]),
         "train",
         _optional_int(data_cfg.get("max_pair_samples")),
@@ -94,10 +103,21 @@ def train_v2(
     backbone = str(model_cfg["backbone"])
     tokenizer = AutoTokenizer.from_pretrained(backbone, use_fast=True)
     tokenizer.save_pretrained(output_dir / "tokenizer")
-    collator = PairedBatchCollator(tokenizer, max_length=int(data_cfg["max_length"]))
+    collator = PairedBatchCollator(
+        tokenizer,
+        max_length=int(data_cfg["max_length"]),
+        input_mode=str(data_cfg.get("input_mode", "claim_evidence")),
+    )
     generator = torch.Generator().manual_seed(seed)
+    proxy_input_mode = str(model_cfg.get("proxy_input_mode", "structured"))
+    training_objective = str(train_cfg.get("objective", "v2"))
+    if training_objective not in {"v2", "bias_reweight", "group_dro"}:
+        raise ValueError("train.objective must be v2, bias_reweight, or group_dro")
     train_loader = DataLoader(
-        PairedDataset(pairs, proxy),
+        PairedDataset(
+            pairs, proxy, proxy_input_mode=proxy_input_mode, seed=seed,
+            group_reweighting=training_objective == "bias_reweight",
+        ),
         batch_size=int(train_cfg["batch_size"]),
         shuffle=True,
         generator=generator,
@@ -106,7 +126,7 @@ def train_v2(
         pin_memory=torch.cuda.is_available(),
     )
     select_loader = DataLoader(
-        PairedDataset(select_pairs, proxy),
+        PairedDataset(select_pairs, proxy, proxy_input_mode=proxy_input_mode, seed=seed),
         batch_size=int(train_cfg["eval_batch_size"]),
         shuffle=False,
         collate_fn=collator,
@@ -126,6 +146,8 @@ def train_v2(
         pi0=proxy.reference_distribution(alpha=proxy.smoothing_alpha),
         proxy_dim=int(proxy_config_value(config, "proxy_embedding_dim", 64)),
         dropout=float(model_cfg.get("dropout", 0.1)),
+        use_z_proxy=bool(model_cfg.get("use_z_proxy", True)),
+        use_w_proxy=bool(model_cfg.get("use_w_proxy", True)),
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -156,6 +178,9 @@ def train_v2(
         {pair_id for pair in pairs for pair_id in (pair.pair_id_inv, pair.pair_id_sem) if pair_id}
     )
     _write_json(output_dir / "selected_pair_ids.json", selected_ids)
+    with (output_dir / "selected_pairs.jsonl").open("w", encoding="utf-8") as handle:
+        for pair_id in selected_ids:
+            handle.write(json.dumps({"pair_id": pair_id}, sort_keys=True) + "\n")
     _write_json(output_dir / "dataset_manifest.json", {
         "base_train_count": len(base_train),
         "base_train_counts_by_dataset": dict(sorted(Counter(
@@ -164,10 +189,14 @@ def train_v2(
         "dev_select_count": len(select_samples),
         "pair_counts": pair_counts,
         "base_train_proxy_sha256": proxy.base_train_source_sha256,
-        "pair_pool_sha256": _file_sha256(Path(paths["pair_pool_train"])),
+        "train_data_fingerprint": train_data_fingerprint,
+        "pair_pool_sha256": _file_sha256(pair_pool_path) if pair_pool_path.exists() else None,
         "dev_select_sha256": _file_sha256(select_path),
     })
 
+    primary_head = str(model_cfg.get("primary_head", "standardized"))
+    if primary_head not in {"standardized", "fact", "g"}:
+        raise ValueError("model.primary_head must be standardized, fact, or g")
     best_score = -1.0
     best_step = 0
     metrics_path = output_dir / "metrics_steps.jsonl"
@@ -181,7 +210,10 @@ def train_v2(
             batch = _to_device(next(iterator), device)
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
                 outputs = model.forward_views(batch)
-                losses = compute_v2_losses(outputs, batch, weights, semantic_margin)
+                if training_objective == "v2":
+                    losses = compute_v2_losses(outputs, batch, weights, semantic_margin)
+                else:
+                    losses = _baseline_group_losses(outputs, batch, training_objective)
                 scaled_loss = losses["total"] / accumulation
             scaler.scale(scaled_loss).backward()
             for key in ("total", "std", "fact", "g", "h", "proxy", "bridge", "invariance", "semantic"):
@@ -198,7 +230,7 @@ def train_v2(
         if should_evaluate:
             predictions_path = output_dir / f"predictions_dev_select_step{optimizer_step}.jsonl"
             metrics = evaluate_classification(
-                model, select_loader, device, head="standardized", predictions_path=predictions_path
+                model, select_loader, device, head=primary_head, predictions_path=predictions_path
             )
             row = {
                 "step": optimizer_step,
@@ -220,14 +252,14 @@ def train_v2(
                 )
             model.train()
 
-    last_metrics = evaluate_classification(model, select_loader, device, head="standardized")
+    last_metrics = evaluate_classification(model, select_loader, device, head=primary_head)
     _save_checkpoint(
         output_dir / "last_model.pt", model, backbone, proxy, variant, seed,
         weights, total_steps, last_metrics,
     )
     _write_json(output_dir / "checkpoint_selection.json", {
         "selection_split": str(data_cfg["select_split"]),
-        "selection_metric": "macro_f1_standardized",
+        "selection_metric": f"macro_f1_{primary_head}",
         "best_step": best_step,
         "best_score": best_score,
         "ood_accessed": False,
@@ -238,7 +270,9 @@ def train_v2(
         "variant": variant,
         "seed": seed,
         "backbone": backbone,
-        "primary_head": "standardized",
+        "primary_head": primary_head,
+        "proxy_input_mode": proxy_input_mode,
+        "training_objective": training_objective,
         "optimizer_steps": total_steps,
         "gradient_accumulation_steps": accumulation,
         "pair_counts": pair_counts,
@@ -253,10 +287,22 @@ def train_v2(
         "torch": torch.__version__,
         "config_sha256": _file_sha256(config_path),
         "proxy_sha256": _file_sha256(proxy_dir / "proxy_builder_v2.json"),
+        "dataset_fingerprint": train_data_fingerprint,
+        "train_data_fingerprint": train_data_fingerprint,
+        "pair_pool_hash": _file_sha256(pair_pool_path) if pair_pool_path.exists() else _value_sha256([]),
+        "selected_ids_hash": _value_sha256(selected_ids),
+        "reference_distribution_hash": _value_sha256(proxy.pi0),
+        "checkpoint": "best_model.pt",
+        "evidence_protocol": str(data_cfg.get("evidence_protocol", "repository_loader_default")),
+        "input_mode": str(data_cfg.get("input_mode", "claim_evidence")),
+        "train_steps": total_steps,
+        "best_dev_selection_metric": f"macro_f1_{primary_head}",
+        "eval_split": str(data_cfg["select_split"]),
         "num_parameters": sum(parameter.numel() for parameter in model.parameters()),
         "num_trainable_parameters": sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
     }
     _write_json(output_dir / "run_manifest.json", manifest)
+    (output_dir / "checkpoint_pointer.txt").write_text("best_model.pt\n", encoding="utf-8")
     (output_dir / "git_commit.txt").write_text(manifest["git_commit"] + "\n", encoding="utf-8")
     (output_dir / "environment.txt").write_text(
         f"python={platform.python_version()}\ntorch={torch.__version__}\ndevice={device}\n",
@@ -312,8 +358,12 @@ def _load_and_validate_config(path: Path, variant: str) -> Dict[str, object]:
     for section in ("paths", "data", "proxy", "model", "loss", "train"):
         if not isinstance(config.get(section), dict):
             raise ValueError(f"missing config section: {section}")
-    if config["model"].get("primary_head") != "standardized":
-        raise ValueError("V2 primary_head must remain standardized")
+    if config["model"].get("primary_head", "standardized") not in {"standardized", "fact", "g"}:
+        raise ValueError("model.primary_head must be standardized, fact, or g")
+    if config["model"].get("proxy_input_mode", "structured") not in {
+        "structured", "none", "random", "shuffled"
+    }:
+        raise ValueError("model.proxy_input_mode must be structured, none, random, or shuffled")
     if config["proxy"].get("freeze_pi0") is not True:
         raise ValueError("V2 training requires freeze_pi0=true")
     total_steps = int(config["train"].get("total_optimizer_steps", 0))
@@ -321,7 +371,38 @@ def _load_and_validate_config(path: Path, variant: str) -> Dict[str, object]:
         raise ValueError("total_optimizer_steps must be positive")
     if int(config["train"].get("grad_accumulation_steps", 0)) <= 0:
         raise ValueError("grad_accumulation_steps must be positive")
+    if config["train"].get("objective", "v2") not in {"v2", "bias_reweight", "group_dro"}:
+        raise ValueError("train.objective must be v2, bias_reweight, or group_dro")
     return config
+
+
+def _baseline_group_losses(
+    outputs: Mapping[str, Mapping[str, torch.Tensor]],
+    batch: Mapping[str, object],
+    objective: str,
+) -> Dict[str, torch.Tensor]:
+    """Fact-head matched bias baselines over original examples only."""
+
+    logits = outputs["base"]["fact_logits"]
+    labels = batch["base"]["labels"]  # type: ignore[index]
+    per_sample = F.cross_entropy(logits.float(), labels, reduction="none")
+    if objective == "bias_reweight":
+        sample_weights = batch["group_weights"].to(per_sample.device)  # type: ignore[union-attr]
+        total = (per_sample * sample_weights).sum() / sample_weights.sum().clamp_min(1e-8)
+    elif objective == "group_dro":
+        groups = list(batch["groups"])  # type: ignore[arg-type]
+        group_losses = []
+        for group in sorted(set(groups)):
+            mask = torch.tensor([value == group for value in groups], device=per_sample.device)
+            group_losses.append(per_sample[mask].mean())
+        total = torch.stack(group_losses).max()
+    else:
+        raise ValueError(f"unsupported baseline objective: {objective}")
+    zero = total * 0.0
+    return {
+        "total": total, "std": zero, "fact": per_sample.mean(), "g": zero,
+        "h": zero, "proxy": zero, "bridge": zero, "invariance": zero, "semantic": zero,
+    }
 
 
 def _select_split_path(config: Mapping[str, object]) -> Path:
@@ -510,6 +591,28 @@ def _file_sha256(path: Path) -> str:
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _value_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _samples_fingerprint(samples: List[FactSample]) -> str:
+    """Order-independent fingerprint of the examples actually used to train."""
+
+    rows = sorted(
+        (sample.dataset, sample.sample_id, sample.label, sample.claim, sample.evidence)
+        for sample in samples
+    )
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(
+            json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        digest.update(b"\n")
     return digest.hexdigest()
 
 

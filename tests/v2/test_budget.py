@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from proxcabi.v2.budget import BudgetConfig, aggregate_group_scores, allocate_pair_budget
+from proxcabi.v2.budget import BudgetConfig, aggregate_group_scores, allocate_pair_budget, select_pairs
 
 
 def _pool() -> list[dict]:
@@ -54,3 +54,14 @@ def test_unverified_rows_are_never_selected() -> None:
     pool[0]["verified"] = False
     selected = allocate_pair_budget(pool, {}, BudgetConfig(total_pairs=8, min_group_pairs=2))
     assert pool[0]["pair_id"] not in selected
+
+
+def test_uniform_group_quota_is_distinct_from_random_pair_sampling() -> None:
+    pool = _pool()
+    # Make one group much larger so equal-group and equal-pair policies diverge.
+    pool.extend({**row, "pair_id": f"extra-{index}-{row['pair_id']}"}
+                for index, row in enumerate(_pool() * 3))
+    config = BudgetConfig(total_pairs=16, min_group_pairs=2, seed=13)
+    uniform = select_pairs("uniform", pool, [], config)
+    random_ids = select_pairs("random", pool, [], config)
+    assert uniform != random_ids

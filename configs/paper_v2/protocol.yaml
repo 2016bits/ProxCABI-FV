@@ -1,0 +1,20 @@
+schema_version: "paper-v2.0"
+base_config: configs/v2/fever_vitaminc_joint.yaml
+seeds: [13, 21, 42]
+pair_budget: 5000
+output_root: outputs/v2/paper
+train_pair_pool: outputs/v2/paper/pairs/pairs_train_verified.jsonl
+eval_invariant_pool: outputs/v2/paper/pairs/pairs_eval_invariant.jsonl
+eval_semantic_pool: outputs/v2/paper/pairs/pairs_eval_semantic.jsonl
+existing_runs:
+  - outputs/v2/joint/main
+  - outputs/v2/joint/ablations
+datasets:
+  - {dataset: FEVER, split: dev_report, role: id_report}
+  - {dataset: FEVER, split: symmetric, role: ood_report}
+  - {dataset: VitaminC, split: test, role: external_report}
+  - {dataset: VitaminC, split: test_real, role: external_real}
+  - {dataset: VitaminC, split: test_synthetic, role: external_synthetic}
+evidence_protocol: gold_evidence_as_converted_by_repository_loader
+checkpoint_selection: FEVER_dev_select_macro_f1_on_declared_primary_head
+

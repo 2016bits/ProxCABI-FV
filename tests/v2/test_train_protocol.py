@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from proxcabi.v2.losses import V2LossWeights
 from proxcabi.data import FactSample
-from proxcabi.v2.train import _select_pair_pool, _validate_pair_coverage, _variant_weights
+from proxcabi.v2.train import (
+    _baseline_group_losses,
+    _samples_fingerprint,
+    _select_pair_pool,
+    _validate_pair_coverage,
+    _variant_weights,
+)
 
 
 LOSS_CONFIG = {
@@ -63,3 +70,35 @@ def test_training_pair_budget_is_deterministic_and_exact() -> None:
     assert {row.metadata["pair_id"] for row in first} == {
         row.metadata["pair_id"] for row in second
     }
+
+
+def test_bias_reweight_and_group_dro_use_fact_head_only() -> None:
+    logits = torch.tensor([[4.0, 0.0], [0.0, 4.0], [0.0, 4.0]], requires_grad=True)
+    outputs = {"base": {"fact_logits": logits}}
+    batch = {
+        "base": {"labels": torch.tensor([0, 0, 1])},
+        "groups": ["major", "minor", "minor"],
+        "group_weights": torch.tensor([0.5, 2.0, 2.0]),
+    }
+    reweighted = _baseline_group_losses(outputs, batch, "bias_reweight")
+    dro = _baseline_group_losses(outputs, batch, "group_dro")
+    assert reweighted["total"].requires_grad
+    assert dro["total"].requires_grad
+    assert float(dro["total"]) > float(reweighted["fact"])
+
+
+def test_train_data_fingerprint_is_order_independent_and_content_sensitive() -> None:
+    first = FactSample(
+        sample_id="a", dataset="FEVER", split="train", claim="claim a",
+        evidence="evidence a", label="supports",
+    )
+    second = FactSample(
+        sample_id="b", dataset="VitaminC", split="train", claim="claim b",
+        evidence="evidence b", label="refutes",
+    )
+    assert _samples_fingerprint([first, second]) == _samples_fingerprint([second, first])
+    changed = FactSample(
+        sample_id="b", dataset="VitaminC", split="train", claim="changed",
+        evidence="evidence b", label="refutes",
+    )
+    assert _samples_fingerprint([first, second]) != _samples_fingerprint([first, changed])

@@ -8,8 +8,12 @@ from proxcabi.v2.structured_proxies import StructuredProxyBuilder
 
 
 class FakeTokenizer:
+    def __init__(self):
+        self.evidence_seen = []
+
     def __call__(self, claims, evidence, **kwargs):
-        del evidence, kwargs
+        self.evidence_seen.append(evidence)
+        del kwargs
         lengths = [max(1, len(value.split())) for value in claims]
         width = max(lengths)
         ids = torch.zeros(len(claims), width, dtype=torch.long)
@@ -66,3 +70,35 @@ def test_unverified_counterfactual_is_not_activated() -> None:
     row.metadata["verified"] = False
     dataset = PairedDataset(make_pair_samples([bases[0]], [row]), proxy)
     assert dataset[0]["sem_mask"] is False
+
+
+def test_random_and_shuffled_proxy_controls_are_seed_deterministic() -> None:
+    bases = [_base(index) for index in range(6)]
+    proxy = StructuredProxyBuilder(lmi_top_k=2, lmi_min_count=1).fit(bases)
+    pairs = make_pair_samples(bases, [])
+    random_a = PairedDataset(pairs, proxy, proxy_input_mode="random", seed=21)
+    random_b = PairedDataset(pairs, proxy, proxy_input_mode="random", seed=21)
+    assert torch.equal(random_a[0]["base"]["z_features"], random_b[0]["base"]["z_features"])
+    assert random_a[0]["base"]["w_id"] == random_b[0]["base"]["w_id"]
+
+    shuffled_a = PairedDataset(pairs, proxy, proxy_input_mode="shuffled", seed=42)
+    shuffled_b = PairedDataset(pairs, proxy, proxy_input_mode="shuffled", seed=42)
+    assert torch.equal(shuffled_a[2]["base"]["z_features"], shuffled_b[2]["base"]["z_features"])
+
+
+def test_no_proxy_control_preserves_shapes_but_removes_signal() -> None:
+    bases = [_base(index) for index in range(3)]
+    proxy = StructuredProxyBuilder(lmi_top_k=2, lmi_min_count=1).fit(bases)
+    row = PairedDataset(make_pair_samples(bases, []), proxy, proxy_input_mode="none")[0]["base"]
+    assert row["z_features"].shape == (proxy.z_dim,)
+    assert not bool(row["z_features"].any())
+    assert row["w_id"] == 0
+
+
+def test_claim_only_collator_never_tokenizes_evidence() -> None:
+    bases = [_base(index) for index in range(2)]
+    proxy = StructuredProxyBuilder(lmi_top_k=2, lmi_min_count=1).fit(bases)
+    dataset = PairedDataset(make_pair_samples(bases, []), proxy)
+    tokenizer = FakeTokenizer()
+    PairedBatchCollator(tokenizer, input_mode="claim_only")([dataset[0], dataset[1]])
+    assert tokenizer.evidence_seen == [None, None, None]

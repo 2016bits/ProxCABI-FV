@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Sequence
 
 from proxcabi.data import FactSample, load_samples
+from sklearn.metrics import mutual_info_score
 
 from .structured_proxies import StructuredProxyBuilder
 
@@ -44,18 +45,28 @@ def proxy_diagnostics(
             "max_class_share": max(distribution, default=0.0),
             "unk_rate": counts.get(unk_id, 0) / total if total and unk_id is not None else 0.0,
             "l1_distance_from_pi0": sum(abs(a - b) for a, b in zip(distribution, proxy.pi0)),
+            "w_label_mutual_information": (
+                float(mutual_info_score(
+                    [proxy.encode_w(sample) for sample in samples],
+                    [sample.label_id for sample in samples],
+                )) if samples else None
+            ),
+            "z_feature_coverage": (
+                float(sum(bool(proxy.encode_z(sample).any()) for sample in samples) / total)
+                if total else None
+            ),
         }
     return result
 
 
 def run_proxy_diagnostics(config_path: Path, output_dir: Path) -> Dict[str, object]:
     import yaml
-    from .train import _load_samples_file
+    from .train import _load_joint_train, _load_samples_file
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     paths, data = config["paths"], config["data"]
     proxy = StructuredProxyBuilder.load(Path(paths["proxy_artifact"]))
-    base = load_samples(Path(paths["data_dir"]), str(data["dataset"]), str(data["train_split"]))
+    base = _load_joint_train(Path(paths["data_dir"]), data)
     observations = {
         "cf_pool_train_observed_only": _load_samples_file(
             Path(paths["pair_pool_train"]), str(data["dataset"]), "train"
@@ -68,6 +79,9 @@ def run_proxy_diagnostics(config_path: Path, output_dir: Path) -> Dict[str, obje
     report = proxy_diagnostics(proxy, base, observations)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "proxy_diagnostics_v2.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (output_dir / "proxy_health.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return report

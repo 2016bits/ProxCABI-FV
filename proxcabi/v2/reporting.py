@@ -36,7 +36,7 @@ def build_paper_tables(runs_dir: Path, output_dir: Path) -> Dict[str, object]:
         }
         for evaluation_name, evaluation in evaluations.items():
             for metric in (
-                "accuracy", "macro_f1", "num_samples", "ipr", "scr",
+                "accuracy", "macro_f1", "num_samples", "ipr", "ipa", "scr", "scr_strict",
                 "changed_only_accuracy", "semantic_flip_rate", "num_semantic_pairs",
             ):
                 if metric in evaluation:

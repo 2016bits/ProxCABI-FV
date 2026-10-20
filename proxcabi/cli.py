@@ -75,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--split", required=True)
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--head", choices=["standardized", "fact", "g"], default="standardized")
+    p.add_argument("--reference", choices=["train_empirical", "train_uniform"], default="train_empirical")
     p.add_argument("--max-samples", type=int)
 
     p = sub.add_parser("v2-evaluate-pairs", help="Evaluate a V2 checkpoint on a verified pair pool")
@@ -85,6 +86,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pair-pool", type=Path, required=True)
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--head", choices=["standardized", "fact", "g"], default="standardized")
+    p.add_argument("--reference", choices=["train_empirical", "train_uniform"], default="train_empirical")
+    p.add_argument("--max-samples", type=int)
+    p.add_argument("--max-pair-samples", type=int)
+
+    p = sub.add_parser("v2-evaluate-clever", help="Evaluate adapted CLEVER with independent fusion and claim-only checkpoints")
+    p.add_argument("--fusion-checkpoint", type=Path, required=True)
+    p.add_argument("--claim-checkpoint", type=Path, required=True)
+    p.add_argument("--fusion-config", type=Path, required=True)
+    p.add_argument("--claim-config", type=Path, required=True)
+    p.add_argument("--dataset")
+    p.add_argument("--split", required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--alpha", type=float, default=1.0)
+    p.add_argument("--max-samples", type=int)
+
+    p = sub.add_parser("v2-evaluate-clever-pairs", help="Evaluate adapted CLEVER on a verified pair pool")
+    p.add_argument("--fusion-checkpoint", type=Path, required=True)
+    p.add_argument("--claim-checkpoint", type=Path, required=True)
+    p.add_argument("--fusion-config", type=Path, required=True)
+    p.add_argument("--claim-config", type=Path, required=True)
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--split", required=True)
+    p.add_argument("--pair-pool", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--alpha", type=float, default=1.0)
     p.add_argument("--max-samples", type=int)
     p.add_argument("--max-pair-samples", type=int)
 
@@ -233,6 +259,7 @@ def main() -> None:
             args.data_dir,
             args.output,
             args.dataset,
+            args.reference,
             args.split,
             args.max_samples,
             args.z_buckets,
@@ -264,6 +291,7 @@ def main() -> None:
             args.head,
             args.max_samples,
             args.dataset,
+            args.reference,
         )
         print(json.dumps(result, indent=2))
     elif args.command == "v2-evaluate-pairs":
@@ -279,6 +307,26 @@ def main() -> None:
             args.head,
             args.max_samples,
             args.max_pair_samples,
+            args.reference,
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-evaluate-clever":
+        from .v2.evaluate import evaluate_clever_checkpoint_v2
+
+        result = evaluate_clever_checkpoint_v2(
+            args.fusion_checkpoint, args.claim_checkpoint,
+            args.fusion_config, args.claim_config,
+            args.split, args.output_dir, args.dataset, args.alpha, args.max_samples,
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "v2-evaluate-clever-pairs":
+        from .v2.evaluate import evaluate_clever_pair_checkpoint_v2
+
+        result = evaluate_clever_pair_checkpoint_v2(
+            args.fusion_checkpoint, args.claim_checkpoint,
+            args.fusion_config, args.claim_config,
+            args.dataset, args.split, args.pair_pool, args.output_dir,
+            args.alpha, args.max_samples, args.max_pair_samples,
         )
         print(json.dumps(result, indent=2))
     elif args.command == "v2-diagnose":

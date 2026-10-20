@@ -5,6 +5,7 @@ import math
 import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from dataclasses import replace
 from statistics import median
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
@@ -197,7 +198,9 @@ def select_pairs(
         randomized = [dict(row, group_id=f"random_{rng.random():.16f}") for row in merged]
         return allocate_pair_budget(randomized, {}, config)
     if mode == "uniform":
-        group_report: Mapping[str, object] = {}
+        # Uniform is an equal group-quota baseline. Random is the distinct
+        # uniform-over-pairs baseline above.
+        return allocate_pair_budget(merged, {}, replace(config, eta=0.0, rho=0.0))
     else:
         adjusted = []
         for row in merged:
